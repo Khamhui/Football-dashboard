@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title_suffix %} — Results{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>{{ event_name }}</h1>
+  <div class="subtitle">{{ season }} Season — Round {{ race_round }}</div>
+</div>
+
+<div class="selector-row">
+  <label class="dim">Season:</label>
+  <select onchange="window.location='/results?season='+this.value">
+    {% for s in seasons %}
+    <option value="{{ s }}" {{ 'selected' if s == season }}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <label class="dim">Round:</label>
+  <select onchange="window.location='/results?season={{ season }}&round='+this.value">
+    {% for r in rounds %}
+    <option value="{{ r }}" {{ 'selected' if r == race_round }}>Round {{ r }}</option>
+    {% endfor %}
+  </select>
+</div>
+
+{# Tabs: Race / Qualifying / Sprint #}
+<div class="tabs">
+  <div class="tab active" onclick="showTab('race')">Race</div>
+  <div class="tab" onclick="showTab('quali')">Qualifying</div>
+  {% if sprint is not none and sprint|length > 0 %}
+  <div class="tab" onclick="showTab('sprint')">Sprint</div>
+  {% endif %}
+</div>
+
+{# Race results #}
+<div id="tab-race" class="tab-content active">
+  {% if race|length > 0 %}
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th class="center" style="width:40px">Pos</th>
+          <th>Driver</th>
+          <th>Team</th>
+          <th class="center">Grid</th>
+          <th class="num">Points</th>
+          <th class="num">Laps</th>
+          <th>Status</th>
+          <th class="num">Fastest Lap</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i, row in race.iterrows() %}
+        {% set pos = row.position %}
+        <tr>
+          <td class="center">
+            {% if pos == pos and pos <= 3 %}
+              <span class="pos-badge pos-{{ pos|int }}">{{ pos|int }}</span>
+            {% elif pos == pos %}
+              <span class="dim">{{ pos|int }}</span>
+            {% else %}
+              <span class="dim">-</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="team-dot" style="background:{{ team_color(row.constructor_id) }}"></span>
+            <strong>{{ driver_name(row.driver_id) }}</strong>
+          </td>
+          <td class="dim">{{ team_name(row.constructor_id) }}</td>
+          <td class="center">{{ row.grid|int if row.grid == row.grid else '-' }}</td>
+          <td class="num">{{ row.points|int if row.points == row.points else 0 }}</td>
+          <td class="num dim">{{ row.laps|int if row.laps == row.laps else '-' }}</td>
+          <td>
+            {% if row.status != 'Finished' and row.status != '+1 Lap' and '+' not in (row.status or '') %}
+              <span class="dnf-high">{{ row.status }}</span>
+            {% else %}
+              <span class="dim">{{ row.status }}</span>
+            {% endif %}
+          </td>
+          <td class="num dim">{{ row.fastest_lap_time if row.fastest_lap_time == row.fastest_lap_time else '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card"><p class="dim">No race results available for this round.</p></div>
+  {% endif %}
+</div>
+
+{# Qualifying #}
+<div id="tab-quali" class="tab-content">
+  {% if quali|length > 0 %}
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th class="center" style="width:40px">Pos</th>
+          <th>Driver</th>
+          <th>Team</th>
+          <th class="num">Q1</th>
+          <th class="num">Q2</th>
+          <th class="num">Q3</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i, row in quali.iterrows() %}
+        <tr>
+          <td class="center">
+            {% if row.position == row.position and row.position <= 3 %}
+              <span class="pos-badge pos-{{ row.position|int }}">{{ row.position|int }}</span>
+            {% elif row.position == row.position %}
+              <span class="dim">{{ row.position|int }}</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="team-dot" style="background:{{ team_color(row.constructor_id) }}"></span>
+            <strong>{{ driver_name(row.driver_id) }}</strong>
+          </td>
+          <td class="dim">{{ team_name(row.constructor_id) }}</td>
+          <td class="num dim">{{ row.q1 if row.q1 == row.q1 else '' }}</td>
+          <td class="num dim">{{ row.q2 if row.q2 == row.q2 else '' }}</td>
+          <td class="num">{{ row.q3 if row.q3 == row.q3 else '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card"><p class="dim">No qualifying data available.</p></div>
+  {% endif %}
+</div>
+
+{# Sprint #}
+{% if sprint is not none and sprint|length > 0 %}
+<div id="tab-sprint" class="tab-content">
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th class="center" style="width:40px">Pos</th>
+          <th>Driver</th>
+          <th>Team</th>
+          <th class="center">Grid</th>
+          <th class="num">Points</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i, row in sprint.iterrows() %}
+        <tr>
+          <td class="center">
+            {% if row.position == row.position and row.position <= 3 %}
+              <span class="pos-badge pos-{{ row.position|int }}">{{ row.position|int }}</span>
+            {% elif row.position == row.position %}
+              <span class="dim">{{ row.position|int }}</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="team-dot" style="background:{{ team_color(row.constructor_id) }}"></span>
+            <strong>{{ driver_name(row.driver_id) }}</strong>
+          </td>
+          <td class="dim">{{ team_name(row.constructor_id) }}</td>
+          <td class="center">{{ row.grid|int if row.grid == row.grid else '-' }}</td>
+          <td class="num">{{ row.points|int if row.points == row.points else 0 }}</td>
+          <td class="dim">{{ row.status }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+{% endblock %}

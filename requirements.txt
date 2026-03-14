@@ -13,6 +13,14 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 plotly>=5.15.0
 
+# Terminal Dashboard
+rich>=13.0.0
+plotext>=5.2.0
+
+# Web Dashboard
+flask>=3.0.0
+feedparser>=6.0.0
+
 # Database
 supabase>=2.0.0
 python-dotenv>=1.0.0
