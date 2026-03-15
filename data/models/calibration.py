@@ -282,7 +282,7 @@ def evaluate_model_calibration(
         Comprehensive calibration report dict
     """
     from data.features.engineer import prepare_training_data
-    from data.models.predictor import _create_model, F1Predictor
+    from data.models.predictor import create_model, F1Predictor
 
     analyzer = CalibrationAnalyzer(n_bins=10)
 

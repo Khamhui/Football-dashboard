@@ -160,8 +160,9 @@ def inject_upcoming_race(season: int, race_round: int) -> str:
     Returns the circuit_id for the race.
     """
     import fastf1
+    from data.ingest.fastf1_ingest import setup_fastf1_cache
 
-    fastf1.Cache.enable_cache(str(Path(__file__).parent / "cache" / "fastf1"))
+    setup_fastf1_cache()
 
     # Get circuit info from FastF1 schedule
     schedule = fastf1.get_event_schedule(season, include_testing=False)
@@ -381,9 +382,10 @@ def run_weekend_prediction(
     5. Display results
     """
     import fastf1
+    from data.ingest.fastf1_ingest import setup_fastf1_cache
 
     # Get event info
-    fastf1.Cache.enable_cache(str(Path(__file__).parent / "cache" / "fastf1"))
+    setup_fastf1_cache()
     schedule = fastf1.get_event_schedule(season, include_testing=False)
     event = schedule[schedule["RoundNumber"] == race_round]
     if event.empty:
@@ -500,8 +502,9 @@ def auto_detect_next_race() -> tuple[int, int]:
     """Detect the next upcoming race from the schedule."""
     import fastf1
     from datetime import datetime
+    from data.ingest.fastf1_ingest import setup_fastf1_cache
 
-    fastf1.Cache.enable_cache(str(Path(__file__).parent / "cache" / "fastf1"))
+    setup_fastf1_cache()
 
     today = datetime.now()
     season = today.year

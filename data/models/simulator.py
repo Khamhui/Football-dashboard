@@ -58,6 +58,16 @@ SC_LATE_RACE_MULT = 0.8      # end of race — field spread, fewer incidents
 SC_EARLY_SHUFFLE_POSITIONS = 3.0   # SC during race shuffles more than at start
 SC_START_SHUFFLE_POSITIONS = 2.5   # SC at start — field already bunched
 
+# --- Multi-car incident probabilities (lap-1 collisions, chain reactions) ---
+MULTI_CAR_INCIDENT_RATES: Dict[str, float] = {
+    "street": 0.30,       # Tight circuits — high lap-1 risk
+    "high_speed": 0.15,   # More spread out, but high-speed incidents
+    "technical": 0.12,    # Lower risk at low-speed circuits
+    "mixed": 0.18,
+}
+MULTI_CAR_MIN_INVOLVED = 2
+MULTI_CAR_MAX_INVOLVED = 5
+
 
 class RaceSimulator:
     """Monte Carlo race simulator for F1 predictions."""
@@ -141,6 +151,12 @@ class RaceSimulator:
         dnf_flags = self._sample_correlated_dnfs(
             n_sims, n_drivers, prob_dnf, driver_ids, constructor_groups,
         )
+
+        # Multi-car incidents (lap-1 collisions, chain reactions)
+        multi_car_dnfs = self._sample_multi_car_incidents(
+            n_sims, n_drivers, pred_positions, circuit_type,
+        )
+        dnf_flags |= multi_car_dnfs
 
         # Pit strategy variation (team-correlated)
         pit_offsets = self._sample_pit_strategy(
@@ -293,6 +309,50 @@ class RaceSimulator:
                 )
 
         return individual_noise
+
+    def _sample_multi_car_incidents(
+        self,
+        n_sims: int,
+        n_drivers: int,
+        pred_positions: np.ndarray,
+        circuit_type: str,
+    ) -> np.ndarray:
+        """
+        Sample multi-car incidents (lap-1 collisions, chain reactions).
+
+        Unlike team-correlated DNFs, these affect random cars from different
+        teams — typically in the midfield pack where cars are bunched together.
+
+        Returns:
+            Boolean array (n_sims, n_drivers) of additional DNFs from incidents.
+        """
+        incident_rate = MULTI_CAR_INCIDENT_RATES.get(
+            circuit_type, MULTI_CAR_INCIDENT_RATES["mixed"]
+        )
+        incident_flags = np.zeros((n_sims, n_drivers), dtype=bool)
+
+        # Which simulations have a multi-car incident?
+        has_incident = self.rng.random(n_sims) < incident_rate
+        incident_sims = np.where(has_incident)[0]
+        if len(incident_sims) == 0:
+            return incident_flags
+
+        # Midfield cars (predicted P4-P16) are more likely to be involved
+        # Weight: Gaussian centered around P10, sigma=4
+        grid_weights = np.exp(-0.5 * ((pred_positions - 10) / 4) ** 2)
+        grid_weights /= grid_weights.sum()
+
+        for sim_idx in incident_sims:
+            n_involved = self.rng.integers(
+                MULTI_CAR_MIN_INVOLVED, MULTI_CAR_MAX_INVOLVED + 1
+            )
+            n_involved = min(n_involved, n_drivers)
+            involved = self.rng.choice(
+                n_drivers, size=n_involved, replace=False, p=grid_weights,
+            )
+            incident_flags[sim_idx, involved] = True
+
+        return incident_flags
 
     def simulate_championship(
         self,

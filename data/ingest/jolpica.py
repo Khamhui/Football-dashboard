@@ -18,20 +18,27 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.jolpi.ca/ergast/f1"
 CACHE_DIR = Path(__file__).parent.parent / "cache" / "jolpica"
-RATE_LIMIT_DELAY = 0.5  # seconds between requests
+RATE_LIMIT_DELAY = 0.8  # seconds between requests (API rate-limits aggressively)
+MAX_RETRIES = 5
 
 
 class JolpicaClient:
     """Client for the Jolpica-F1 (Ergast successor) API."""
 
+    _NESTED_KEYS = {
+        "Races": ["Results", "QualifyingResults", "SprintResults", "Laps", "PitStops"],
+        "StandingsLists": ["DriverStandings", "ConstructorStandings"],
+    }
+
     def __init__(self, cache: bool = True):
         self.session = requests.Session()
         self.cache = cache
+        self._delay = RATE_LIMIT_DELAY
         if cache:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _get(self, endpoint: str, limit: int = 1000, offset: int = 0) -> dict:
-        """Make a paginated API request with caching."""
+    def _get(self, endpoint: str, limit: int = 100, offset: int = 0) -> dict:
+        """Make a paginated API request with caching and retry on 429."""
         cache_key = endpoint.replace("/", "_").strip("_") + f"_L{limit}_O{offset}"
         cache_file = CACHE_DIR / f"{cache_key}.json"
 
@@ -42,31 +49,46 @@ class JolpicaClient:
         url = f"{BASE_URL}/{endpoint}.json?limit={limit}&offset={offset}"
         logger.debug(f"GET {url}")
 
-        resp = self.session.get(url, timeout=30)
-        resp.raise_for_status()
+        for attempt in range(MAX_RETRIES):
+            resp = self.session.get(url, timeout=30)
+            if resp.status_code == 429:
+                wait = 2 ** attempt
+                logger.warning(f"429 rate limited, retrying in {wait}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                time.sleep(wait)
+                self._delay = min(self._delay * 1.5, 5.0)  # back off future requests
+                continue
+            resp.raise_for_status()
+            break
+        else:
+            resp.raise_for_status()
+
         data = resp.json()
 
         if self.cache:
             with open(cache_file, "w") as f:
                 json.dump(data, f)
 
-        time.sleep(RATE_LIMIT_DELAY)
+        time.sleep(self._delay)
+        # Gradually recover toward base delay after success
+        self._delay = max(RATE_LIMIT_DELAY, self._delay * 0.8)
         return data
 
     def _get_all(self, endpoint: str, table_key: str) -> list:
         """Paginate through all results for an endpoint."""
         all_items = []
         offset = 0
-        limit = 1000
+        limit = 100  # Jolpica server caps at 100 regardless of requested limit
 
         first = self._get(endpoint, limit=limit, offset=0)
         mr = first["MRData"]
         total = int(mr["total"])
 
         # Find the table data — Ergast nests it under a *Table key
+        table_wrapper_key = None
         table_data = None
         for key, val in mr.items():
             if key.endswith("Table"):
+                table_wrapper_key = key
                 table_data = val
                 break
 
@@ -75,22 +97,47 @@ class JolpicaClient:
 
         items = table_data.get(table_key, [])
         all_items.extend(items)
-        offset += limit
 
-        # Cache the table wrapper key from first response
-        table_wrapper_key = next((k for k in mr if k.endswith("Table")), None)
+        # Count actual result rows (nested inside race objects for results endpoints)
+        first_count = self._count_nested_results(items, table_key)
+        offset += first_count if first_count > 0 else len(items)
 
-        if total > limit and table_wrapper_key:
-            pbar = tqdm(total=total, initial=len(items), desc=endpoint)
+        if offset < total and table_wrapper_key:
+            pbar = tqdm(total=total, initial=offset, desc=endpoint)
             while offset < total:
                 page = self._get(endpoint, limit=limit, offset=offset)
                 new_items = page["MRData"][table_wrapper_key].get(table_key, [])
+                if not new_items:
+                    break
                 all_items.extend(new_items)
-                pbar.update(len(new_items))
-                offset += limit
+                page_count = self._count_nested_results(new_items, table_key)
+                offset += page_count if page_count > 0 else len(new_items)
+                pbar.update(page_count if page_count > 0 else len(new_items))
             pbar.close()
 
         return all_items
+
+    @classmethod
+    def _count_nested_results(cls, items: list, table_key: str) -> int:
+        """Count actual result rows for nested endpoints.
+
+        The Jolpica API's `total` counts inner rows (e.g., individual Results
+        inside Races, or DriverStandings inside StandingsLists), so pagination
+        offsets must advance by that inner count, not by len(items).
+        """
+        keys_to_check = cls._NESTED_KEYS.get(table_key)
+        if not keys_to_check:
+            return 0
+        count = 0
+        for item in items:
+            for nk in keys_to_check:
+                inner = item.get(nk, [])
+                if inner:
+                    count += len(inner)
+                    break
+            else:
+                count += 1
+        return count
 
     # ── Core Data Endpoints ──────────────────────────────────────────
 

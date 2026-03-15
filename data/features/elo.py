@@ -40,6 +40,16 @@ CIRCUIT_TYPES = {
     "sepang": "mixed", "hockenheimring": "mixed", "nurburgring": "mixed",
     "istanbul": "mixed", "portimao": "mixed", "mugello": "mixed",
     "sakhir": "mixed", "ricard": "mixed",
+    # Historic / removed circuits
+    "villeneuve": "technical",    # Circuit Gilles Villeneuve, Montreal — tight chicanes
+    "magny_cours": "technical",   # Magny-Cours — lots of slow-speed corners
+    "indianapolis": "high_speed", # Indianapolis — long straights, banked turn
+    "rodriguez": "high_speed",    # Autódromo Hermanos Rodríguez — long straight, high altitude
+    "fuji": "mixed",              # Fuji Speedway — long straight + technical sector
+    "sochi": "street",            # Sochi Autodrom — 90° street-style corners, hard to overtake
+    "valencia": "street",         # Valencia Street Circuit
+    "yeongam": "mixed",           # Korea International Circuit — street/permanent hybrid
+    "buddh": "mixed",             # Buddh International Circuit — flowing layout
 }
 
 DEFAULT_CIRCUIT_TYPE = "mixed"

@@ -81,7 +81,7 @@ def walk_forward_backtest(
         DataFrame with per-race metrics, predicted probabilities, and breakdowns
     """
     from data.features.engineer import prepare_training_data
-    from data.models.predictor import _create_model, F1Predictor
+    from data.models.predictor import create_model, F1Predictor
 
     results = []
     all_driver_predictions = []
@@ -140,7 +140,7 @@ def walk_forward_backtest(
         X_test = X_test[X_train.columns]
 
         # Train a quick model (no ensemble for speed)
-        model = _create_model(
+        model = create_model(
             "regressor", n_estimators=500, max_depth=6,
             learning_rate=0.05, random_state=42,
         )
@@ -178,7 +178,7 @@ def walk_forward_backtest(
                     continue
 
                 spw = len(y_cls_train) / max(y_cls_train.sum(), 1) - 1
-                clf = _create_model(
+                clf = create_model(
                     "classifier", n_estimators=300, max_depth=depth,
                     learning_rate=lr, scale_pos_weight=spw, random_state=42,
                 )
@@ -203,7 +203,7 @@ def walk_forward_backtest(
 
             if train_dnf.sum() >= 5:
                 spw_dnf = len(train_dnf) / max(train_dnf.sum(), 1) - 1
-                clf_dnf = _create_model(
+                clf_dnf = create_model(
                     "classifier", n_estimators=300, max_depth=4,
                     learning_rate=0.03, scale_pos_weight=spw_dnf, random_state=42,
                 )

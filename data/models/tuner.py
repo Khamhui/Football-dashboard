@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 PARAMS_DIR = Path(__file__).parent.parent / "cache" / "models"
 
 
-def _create_model_with_params(trial: optuna.Trial, task: str = "regressor"):
+def create_model_with_params(trial: optuna.Trial, task: str = "regressor"):
     """Create a gradient boosting model with Optuna-suggested params."""
     params = {
         "n_estimators": trial.suggest_int("n_estimators", 200, 1000, step=100),
@@ -42,8 +42,8 @@ def _create_model_with_params(trial: optuna.Trial, task: str = "regressor"):
     is_reg = task == "regressor"
 
     # Use the same model creation as predictor to ensure tuned params match
-    from data.models.predictor import _create_model
-    model = _create_model(
+    from data.models.predictor import create_model
+    model = create_model(
         task,
         n_estimators=params["n_estimators"],
         max_depth=params["max_depth"],
@@ -67,7 +67,7 @@ def tune_position_model(
     tscv = TimeSeriesSplit(n_splits=5)
 
     def objective(trial):
-        model, _ = _create_model_with_params(trial, "regressor")
+        model, _ = create_model_with_params(trial, "regressor")
         scores = cross_val_score(
             model, X, y, cv=tscv, scoring="neg_mean_absolute_error", n_jobs=-1
         )
@@ -91,7 +91,7 @@ def tune_classifier(
     tscv = TimeSeriesSplit(n_splits=5)
 
     def objective(trial):
-        model, _ = _create_model_with_params(trial, "classifier")
+        model, _ = create_model_with_params(trial, "classifier")
         scores = cross_val_score(
             model, X, y, cv=tscv, scoring="accuracy", n_jobs=-1
         )

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).parent.parent / "cache" / "models"
 
 
-def _create_model(task: str = "regressor", **kwargs):
+def create_model(task: str = "regressor", **kwargs):
     """
     Create the best available gradient boosting model.
     Tries CatBoost -> XGBoost -> LightGBM -> sklearn HistGradientBoosting.
@@ -166,7 +166,7 @@ class F1Predictor:
 
         # 1. Position Regression — Stacking Ensemble
         logger.info("Training stacking position regression model...")
-        base_gb = _create_model("regressor", **pos_params)
+        base_gb = create_model("regressor", **pos_params)
         base_extra = ExtraTreesRegressor(
             n_estimators=300, max_depth=8, random_state=42, n_jobs=-1,
         )
@@ -180,7 +180,7 @@ class F1Predictor:
         )
 
         # Quick single-model CV baseline
-        _quick = _create_model("regressor", **pos_params)
+        _quick = create_model("regressor", **pos_params)
         cv_scores = cross_val_score(
             _quick, X, y_position, cv=tscv, scoring="neg_mean_absolute_error",
         )
@@ -195,7 +195,7 @@ class F1Predictor:
                            min_child_weight=5, reg_alpha=0.1, reg_lambda=1.0)
         pod_params = _get_params("podium", pod_defaults)
         pod_params["scale_pos_weight"] = len(y_podium) / max(y_podium.sum(), 1) - 1
-        _podium_base = _create_model("classifier", **pod_params)
+        _podium_base = create_model("classifier", **pod_params)
         cv_scores = cross_val_score(_podium_base, X, y_podium, cv=tscv, scoring="accuracy")
         logger.info(f"Podium accuracy (CV): {cv_scores.mean():.3f} +/- {cv_scores.std():.3f}")
         self.podium_model = CalibratedClassifierCV(
@@ -209,7 +209,7 @@ class F1Predictor:
                            min_child_weight=5, reg_alpha=0.1, reg_lambda=1.0)
         win_params = _get_params("winner", win_defaults)
         win_params["scale_pos_weight"] = len(y_winner) / max(y_winner.sum(), 1) - 1
-        _winner_base = _create_model("classifier", **win_params)
+        _winner_base = create_model("classifier", **win_params)
         self.winner_model = CalibratedClassifierCV(
             _winner_base, cv=TimeSeriesSplit(n_splits=3), method="isotonic",
         )
@@ -220,7 +220,7 @@ class F1Predictor:
         pts_defaults = dict(n_estimators=300, max_depth=5, learning_rate=0.05, subsample=0.8,
                            min_child_weight=5, reg_alpha=0.1, reg_lambda=1.0)
         pts_params = _get_params("points", pts_defaults)
-        _points_base = _create_model("classifier", **pts_params)
+        _points_base = create_model("classifier", **pts_params)
         self.points_model = CalibratedClassifierCV(
             _points_base, cv=TimeSeriesSplit(n_splits=3), method="isotonic",
         )
@@ -232,7 +232,7 @@ class F1Predictor:
             y_dnf = (y_position.isna() | (y_position > 20)).astype(int)
         else:
             y_dnf = y_dnf.reindex(X.index).fillna(0).astype(int)
-        _dnf_base = _create_model(
+        _dnf_base = create_model(
             "classifier", n_estimators=300, max_depth=4, learning_rate=0.03,
             scale_pos_weight=len(y_dnf) / max(y_dnf.sum(), 1) - 1,
             subsample=0.8, random_state=42, n_jobs=-1,
