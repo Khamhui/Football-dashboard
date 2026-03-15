@@ -38,10 +38,11 @@ import bisect
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import pandas as pd
 import numpy as np
+from scipy.stats import spearmanr
 
 from data.features.elo import F1EloSystem, CIRCUIT_TYPES, DEFAULT_CIRCUIT_TYPE
 
@@ -83,6 +84,18 @@ def _linear_trend(values: np.ndarray) -> float:
     return np.polyfit(range(len(values)), values, 1)[0]
 
 
+def _ewm(values: Iterable[float], alpha: float) -> float:
+    """Exponentially weighted moving average. Recent values weighted more.
+
+    Caller must ensure values is non-empty.
+    """
+    it = iter(values)
+    ewm = next(it)
+    for v in it:
+        ewm = alpha * v + (1 - alpha) * ewm
+    return ewm
+
+
 def _is_classified(status: str) -> bool:
     """Whether a driver was classified (finished or lapped)."""
     return status == "Finished" or status.startswith("+")
@@ -108,6 +121,13 @@ def _default_circuit_features() -> dict:
         "circuit_avg_pos": np.nan,
         "circuit_best_pos": np.nan,
         "circuit_podium_rate": 0,
+        "circuit_ewm_pos": np.nan,
+        "circuit_avg_gained": np.nan,
+        "circuit_recent_gained": np.nan,
+        "circuit_win_streak": 0,
+        "circuit_quali_avg": np.nan,
+        "circuit_quali_best": np.nan,
+        "circuit_quali_recent": np.nan,
     }
 
 
@@ -674,11 +694,8 @@ def _compute_circuit_dna(
         grids = valid["grid"].values.astype(float)
         finishes = valid["position"].values.astype(float)
 
-        # Spearman rank correlation via numpy (handles ties)
-        rank_g = pd.Series(grids).rank().values
-        rank_f = pd.Series(finishes).rank().values
-        corr_matrix = np.corrcoef(rank_g, rank_f)
-        corr = corr_matrix[0, 1] if not np.isnan(corr_matrix[0, 1]) else 0.5
+        # Spearman rank correlation (handles ties and degenerate cases)
+        corr, _ = spearmanr(grids, finishes)
 
         avg_delta = float(np.mean(np.abs(grids - finishes)))
 
@@ -693,7 +710,7 @@ def _compute_circuit_dna(
         pos_variance = float(np.std(finishes))
 
         dna[circuit_id] = {
-            "grid_position_correlation": float(corr),
+            "grid_position_correlation": float(corr) if np.isfinite(corr) else np.nan,
             "avg_positions_changed": avg_delta,
             "front_row_win_rate": front_row_win,
             "front_row_lock_rate": front_row_lock,
@@ -903,8 +920,8 @@ def build_feature_matrix(
     constructor_pace_by_circuit_type: dict[tuple[str, int], dict[str, list[float]]] = {}
     # Team pit stop history: (team_name) -> list of {pit_time_avg, clean_pct}
     team_pit_stop_history: dict[str, list[dict]] = {}
-    # Constructor-at-circuit history: (constructor_id, circuit_id) -> list of avg positions
-    constructor_circuit_history: dict[tuple[str, str], list[float]] = {}
+    # Constructor-at-circuit history: (constructor_id, circuit_id) -> list of (season, position)
+    constructor_circuit_history: dict[tuple[str, str], list[tuple[int, float]]] = {}
     # Driver qualifying-at-circuit history: (driver_id, circuit_id) -> list of quali positions
     driver_quali_circuit: dict[tuple[str, str], list[int]] = {}
 
@@ -1089,37 +1106,34 @@ def build_feature_matrix(
                     features["compromised_rate_last10"] = hist_df.tail(10)["compromised"].mean()
 
                 # Circuit-specific history
+                features.update(_DEFAULT_CIRCUIT)
                 circuit_hist = hist_df[hist_df["circuit_id"] == circuit_id]
                 if not circuit_hist.empty:
+                    pos_col = circuit_hist["position"]
+                    pos_values = pos_col.dropna().values
                     features["circuit_races"] = len(circuit_hist)
-                    features["circuit_avg_pos"] = circuit_hist["position"].mean()
-                    features["circuit_best_pos"] = circuit_hist["position"].min()
-                    features["circuit_podium_rate"] = (circuit_hist["position"] <= 3).mean()
+                    features["circuit_avg_pos"] = pos_col.mean()
+                    features["circuit_best_pos"] = pos_col.min()
+                    features["circuit_podium_rate"] = (pos_col <= 3).mean()
 
-                    # Recency-weighted circuit performance (alpha=0.4, recent races matter more)
-                    circuit_positions = circuit_hist["position"].dropna().values
-                    if len(circuit_positions) >= 2:
-                        alpha = 0.4
-                        ewm = circuit_positions[0]
-                        for p in circuit_positions[1:]:
-                            ewm = alpha * p + (1 - alpha) * ewm
-                        features["circuit_ewm_pos"] = ewm
-                    else:
-                        features["circuit_ewm_pos"] = circuit_positions[0] if len(circuit_positions) > 0 else np.nan
+                    # Recency-weighted circuit performance
+                    if len(pos_values) >= 2:
+                        features["circuit_ewm_pos"] = _ewm(pos_values, 0.4)
+                    elif len(pos_values) == 1:
+                        features["circuit_ewm_pos"] = pos_values[0]
 
                     # Circuit-specific positions gained (grid → finish delta)
                     circuit_gains = circuit_hist[circuit_hist["grid"] > 0]
                     if not circuit_gains.empty:
                         deltas = circuit_gains["grid"] - circuit_gains["position"]
                         features["circuit_avg_gained"] = deltas.mean()
-                        # Recent trend at this circuit (last 3 appearances)
-                        if len(deltas) >= 2:
+                        if len(deltas) >= 3:
                             features["circuit_recent_gained"] = deltas.tail(3).mean()
 
-                    # Win/podium streak at this circuit
-                    wins_at_circuit = (circuit_hist["position"] == 1).values
+                    # Win streak at this circuit
+                    wins = (pos_col == 1).values
                     streak = 0
-                    for w in reversed(wins_at_circuit):
+                    for w in reversed(wins):
                         if w:
                             streak += 1
                         else:
@@ -1127,15 +1141,13 @@ def build_feature_matrix(
                     if streak > 0:
                         features["circuit_win_streak"] = streak
 
-                # Qualifying-at-circuit history (from accumulator, not hist_df)
+                # Qualifying-at-circuit history (independent of race finishes)
                 qc_hist = driver_quali_circuit.get((driver_id, circuit_id), [])
                 if qc_hist:
                     features["circuit_quali_avg"] = np.mean(qc_hist)
                     features["circuit_quali_best"] = min(qc_hist)
                     if len(qc_hist) >= 2:
                         features["circuit_quali_recent"] = np.mean(qc_hist[-3:])
-                else:
-                    features.update(_DEFAULT_CIRCUIT)
 
                 # Season momentum
                 season_hist = hist_df[hist_df["season"] == season]
@@ -1224,11 +1236,15 @@ def build_feature_matrix(
             cc_key = (constructor_id, circuit_id)
             cc_hist = constructor_circuit_history.get(cc_key, [])
             if cc_hist:
-                features["constructor_circuit_avg"] = np.mean(cc_hist)
-                features["constructor_circuit_races"] = len(cc_hist)
-                if len(cc_hist) >= 2:
-                    features["constructor_circuit_recent"] = np.mean(cc_hist[-3:])
-                    features["constructor_circuit_trend"] = cc_hist[-1] - np.mean(cc_hist)
+                cc_positions = [p for _, p in cc_hist]
+                features["constructor_circuit_avg"] = np.mean(cc_positions)
+                features["constructor_circuit_races"] = len(cc_positions)
+                if len(cc_positions) >= 2:
+                    features["constructor_circuit_recent"] = np.mean(cc_positions[-3:])
+                    # Trend: latest result vs baseline (last 3 seasons, excluding latest)
+                    recent_cc = [p for s, p in cc_hist if s >= season - 3]
+                    if len(recent_cc) >= 2:
+                        features["constructor_circuit_trend"] = recent_cc[-1] - np.mean(recent_cc[:-1])
 
             # ── DNF Risk Indicators (list ops, no DataFrame overhead) ──
             # dnf_rate_last20 already computed in rolling stats above
@@ -1295,11 +1311,7 @@ def build_feature_matrix(
                     if not np.isnan(h["position"])
                 ]
                 if recent5_pos:
-                    alpha = 0.3
-                    ewm = recent5_pos[0]
-                    for p in recent5_pos[1:]:
-                        ewm = alpha * p + (1 - alpha) * ewm
-                    features["momentum_score"] = ewm
+                    features["momentum_score"] = _ewm(recent5_pos, 0.3)
 
                 # Form vs season avg: current 3-race rolling avg minus season avg
                 season_positions = [
@@ -1333,7 +1345,7 @@ def build_feature_matrix(
                 features["grid_x_technical"] = grid * is_technical
 
                 # Grid weighted by how much it matters at this circuit
-                if dna_corr is not None:
+                if dna_corr is not None and not np.isnan(dna_corr):
                     features["grid_weighted_by_correlation"] = grid * dna_corr
                     features["grid_importance_score"] = dna_corr
                     features["grid_expected_finish"] = grid * dna_corr + (1 - dna_corr) * 10.0
@@ -1444,7 +1456,7 @@ def build_feature_matrix(
                 # Update constructor-at-circuit accumulator
                 constructor_circuit_history.setdefault(
                     (constructor_id, circuit_id), []
-                ).append(pos)
+                ).append((season, pos))
 
             # Update FastF1 history (after feature extraction — no leakage)
             f1_key = (season, rnd, driver_id)
@@ -1472,22 +1484,19 @@ def build_feature_matrix(
                     ),
                 })
 
-            # Update qualifying-at-circuit accumulator
+            # Update qualifying-at-circuit + H2H trackers
             if quali_lookup:
                 my_quali = quali_lookup.get(driver_id)
                 if my_quali is not None:
                     driver_quali_circuit.setdefault(
                         (driver_id, circuit_id), []
                     ).append(my_quali)
-
-            # Update qualifying H2H tracker (after feature extraction — no leakage)
-            if quali_lookup and teammate_id is not None:
-                my_quali = quali_lookup.get(driver_id)
-                mate_quali = quali_lookup.get(teammate_id)
-                if my_quali is not None and mate_quali is not None:
-                    driver_quali_h2h.setdefault(driver_id, []).append(
-                        1 if my_quali < mate_quali else 0
-                    )
+                    if teammate_id is not None:
+                        mate_quali = quali_lookup.get(teammate_id)
+                        if mate_quali is not None:
+                            driver_quali_h2h.setdefault(driver_id, []).append(
+                                1 if my_quali < mate_quali else 0
+                            )
 
             # Update career race counter (after feature extraction — no leakage)
             driver_career_races[driver_id] = driver_career_races.get(driver_id, 0) + 1
