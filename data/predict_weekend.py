@@ -255,10 +255,29 @@ def remove_placeholder_rows():
         logger.info(f"Cleaned {len(rr) - len(clean)} placeholder rows")
 
 
+def detect_conditions(season: int, race_round: int) -> str:
+    """Detect weather conditions from FastF1 session data. Returns 'dry', 'wet', or 'mixed'."""
+    try:
+        import fastf1
+        session = fastf1.get_session(season, race_round, "R")
+        session.load(telemetry=False, weather=True, messages=False)
+        weather = session.weather_data
+        if weather is not None and not weather.empty and "Rainfall" in weather.columns:
+            rain_pct = weather["Rainfall"].mean()
+            if rain_pct > 0.5:
+                return "wet"
+            elif rain_pct > 0.1:
+                return "mixed"
+    except Exception:
+        pass
+    return "dry"
+
+
 def predict_race(
     season: int,
     race_round: int,
     n_simulations: int = 10000,
+    conditions: str = "dry",
 ) -> pd.DataFrame:
     """
     Full prediction pipeline for an upcoming race.
@@ -267,7 +286,7 @@ def predict_race(
     2. Loads feature matrix
     3. Extracts features for this race
     4. Predicts positions + probabilities
-    5. Runs Monte Carlo simulation
+    5. Runs Monte Carlo simulation (condition-aware)
 
     Returns simulation results DataFrame.
     """
@@ -302,9 +321,19 @@ def predict_race(
     circuit_id = race_data["circuit_id"].iloc[0]
     circuit_type = CIRCUIT_TYPES.get(circuit_id, DEFAULT_CIRCUIT_TYPE)
 
-    # Simulate
+    # Build constructor map for correlated team DNFs
+    constructor_map = None
+    if "constructor_id" in race_data.columns:
+        constructor_map = dict(zip(race_data["driver_id"], race_data["constructor_id"]))
+
+    # Simulate with conditions and constructor correlation
     simulator = RaceSimulator(n_simulations=n_simulations)
-    results = simulator.simulate_race(predictions, circuit_type)
+    results = simulator.simulate_race(
+        predictions,
+        circuit_type,
+        conditions=conditions,
+        constructor_map=constructor_map,
+    )
 
     return results
 
@@ -393,9 +422,11 @@ def run_weekend_prediction(
         # Clean up placeholder rows after feature extraction
         remove_placeholder_rows()
 
-    # Step 4: Predict
-    print(f"\nStep 4: Running prediction + Monte Carlo ({n_simulations:,} simulations)...")
-    results = predict_race(season, race_round, n_simulations=n_simulations)
+    # Step 4: Detect conditions and predict
+    conditions = detect_conditions(season, race_round)
+    print(f"\nStep 4: Conditions = {conditions.upper()}")
+    print(f"  Running prediction + Monte Carlo ({n_simulations:,} simulations)...")
+    results = predict_race(season, race_round, n_simulations=n_simulations, conditions=conditions)
 
     if results.empty:
         print("Prediction failed — check logs.")
@@ -403,9 +434,31 @@ def run_weekend_prediction(
 
     # Step 5: Display
     print(f"\n{'='*60}")
-    print(f"  RACE PREDICTION: {season} {event_name}")
+    print(f"  RACE PREDICTION: {season} {event_name} [{conditions.upper()}]")
     print(f"{'='*60}\n")
     print(format_prediction_table(results))
+
+    # Step 5b: Compare with betting odds (if available)
+    try:
+        from data.ingest.odds import OddsClient
+        from data.models.value import ValueDetector
+
+        client = OddsClient()
+        odds = client.load_odds(season, race_round)
+        if odds is not None and not odds.empty:
+            detector = ValueDetector()
+            value = detector.find_value(results, odds)
+            if not value.empty:
+                print(f"\n{'='*60}")
+                print(f"  VALUE DETECTION (vs. bookmaker odds)")
+                print(f"{'='*60}")
+                for _, v in value.iterrows():
+                    edge = v.get("edge", 0) * 100
+                    rating = v.get("value_rating", "")
+                    if edge > 0:
+                        print(f"  {v['driver_id']:<20} edge={edge:+.1f}%  kelly={v.get('kelly_fraction', 0):.1%}  [{rating}]")
+    except Exception:
+        pass
 
     # Save results
     output_path = DATA_DIR / f"prediction_{season}_R{race_round:02d}.csv"

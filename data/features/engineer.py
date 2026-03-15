@@ -27,6 +27,11 @@ Feature categories:
 18. Teammate comparison (ELO diff, qualifying H2H, positions gained)
 19. Momentum / form (exponentially weighted position, form vs season avg)
 20. FP2 long run analysis (race pace indicator, tire degradation rate)
+21. Grid × circuit type interaction (grid impact varies by circuit type)
+22. Overtaking difficulty (historical positions gained per circuit)
+23. Constructor upgrade detection (pace jumps mid-season)
+24. Cold start / rookie handling (career races, teammate ELO prior)
+25. Pit stop performance (team pit stop quality from FastF1 stint data)
 """
 
 import bisect
@@ -66,6 +71,11 @@ _SC_CODES = {"4", "41", "42", "45", "46", "47"}
 _VSC_CODES = {"6", "61", "67", "671"}
 _YELLOW_CODES = {"2", "21", "24", "26", "12"}
 _SC_VSC_CODES = _SC_CODES | _VSC_CODES  # Pre-computed union
+
+# Circuit type sets for interaction features (derived from CIRCUIT_TYPES)
+_STREET_CIRCUITS = {cid for cid, ct in CIRCUIT_TYPES.items() if ct == "street"}
+_HIGH_SPEED_CIRCUITS = {cid for cid, ct in CIRCUIT_TYPES.items() if ct == "high_speed"}
+_TECHNICAL_CIRCUITS = {cid for cid, ct in CIRCUIT_TYPES.items() if ct == "technical"}
 
 
 def _linear_trend(values: np.ndarray) -> float:
@@ -558,6 +568,106 @@ def _build_standings_index(
     return driver_standings_index, constructor_standings_index
 
 
+def _compute_circuit_overtaking_rates(
+    race_results: pd.DataFrame,
+) -> dict[str, dict]:
+    """
+    Compute historical overtaking stats per circuit from race results.
+
+    Returns dict keyed by circuit_id -> {
+        "avg_positions_gained": float,  # average abs(grid - finish) per driver
+        "grid_finish_map": dict[int, float],  # grid_pos -> avg finish position
+    }
+    """
+    if race_results is None or race_results.empty:
+        return {}
+
+    stats = {}
+    for circuit_id, group in race_results.groupby("circuit_id"):
+        valid = group[
+            (group["grid"] > 0)
+            & group["position"].notna()
+            & (group["position"] > 0)
+        ]
+        if valid.empty:
+            continue
+
+        deltas = (valid["grid"] - valid["position"]).abs()
+        avg_delta = deltas.mean()
+
+        # Per-grid-position average finish (for expected_grid_delta)
+        grid_finish = {}
+        for grid_pos, g_group in valid.groupby("grid"):
+            grid_pos = int(grid_pos)
+            if len(g_group) >= 3:
+                grid_finish[grid_pos] = g_group["position"].mean()
+
+        stats[circuit_id] = {
+            "avg_positions_gained": avg_delta,
+            "grid_finish_map": grid_finish,
+        }
+
+    logger.info(f"Computed overtaking rates for {len(stats)} circuits")
+    return stats
+
+
+def _compute_pit_stop_stats(
+    fastf1_laps: pd.DataFrame,
+    driver_code_map: dict[str, str],
+) -> dict[tuple[int, int, str], dict]:
+    """
+    Estimate pit stop performance from FastF1 stint transitions.
+
+    Uses time between last lap of stint N and first lap of stint N+1
+    as a proxy for pit stop duration (includes in-lap/out-lap delta).
+
+    Returns dict keyed by (season, round, team) -> {pit_time_avg, pit_count, clean_pct}.
+    """
+    if fastf1_laps is None or fastf1_laps.empty:
+        return {}
+
+    race_laps = fastf1_laps[fastf1_laps["session_type"] == "R"]
+    if race_laps.empty:
+        return {}
+
+    required_cols = {"Stint", "LapTime_s", "Team", "LapNumber"}
+    if not required_cols.issubset(race_laps.columns):
+        return {}
+
+    stats = {}
+    for (year, gp), group in race_laps.groupby(["year", "gp"]):
+        team_pit_times: dict[str, list[float]] = {}
+
+        for driver_code, dlaps in group.groupby("Driver"):
+            team = dlaps["Team"].iloc[0] if "Team" in dlaps.columns else None
+            if not team:
+                continue
+
+            sorted_laps = dlaps.sort_values("LapNumber")
+            stints = sorted_laps["Stint"].values
+            lap_times = sorted_laps["LapTime_s"].values
+
+            # Detect pit stop laps: first lap of each new stint has inflated time
+            for i in range(1, len(stints)):
+                if stints[i] != stints[i - 1] and not np.isnan(lap_times[i]):
+                    team_pit_times.setdefault(team, []).append(lap_times[i])
+
+        for team, pit_times in team_pit_times.items():
+            if not pit_times:
+                continue
+            median_pit = np.median(pit_times)
+            # "Clean" pit stop: within 1.5x of median (no issues)
+            clean = sum(1 for t in pit_times if t < median_pit * 1.5)
+            stats[(int(year), int(gp), team)] = {
+                "pit_time_avg": np.mean(pit_times),
+                "pit_count": len(pit_times),
+                "clean_pct": clean / len(pit_times),
+            }
+
+    logger.info(f"Computed pit stop stats for {len(stats)} team-race entries")
+    return stats
+
+
 def build_feature_matrix(
     race_results: pd.DataFrame,
     qualifying: pd.DataFrame,
@@ -613,6 +723,13 @@ def build_feature_matrix(
         if s not in standings_max_round or r > standings_max_round[s]:
             standings_max_round[s] = r
 
+    # Pre-compute circuit overtaking rates (from all historical data)
+    circuit_overtaking = _compute_circuit_overtaking_rates(race_results)
+
+    # Pre-compute pit stop stats from FastF1 stint data
+    pit_stop_stats = _compute_pit_stop_stats(fastf1_laps, driver_code_map)
+    has_pit_stops = bool(pit_stop_stats)
+
     # Sort chronologically
     race_results = race_results.sort_values(["season", "round", "position"]).copy()
 
@@ -620,6 +737,33 @@ def build_feature_matrix(
     race_groups = {}
     for (season, rnd), group in race_results.groupby(["season", "round"]):
         race_groups[(int(season), int(rnd))] = group
+
+    # Pre-build FastF1 team name -> constructor_id mapping for pit stop features
+    # Maps (year, gp, fastf1_team) -> constructor_id
+    _fastf1_team_to_constructor: dict[tuple[int, int, str], str] = {}
+    if has_pit_stops and fastf1_laps is not None and not fastf1_laps.empty:
+        race_laps_pit = fastf1_laps[fastf1_laps["session_type"] == "R"]
+        if not race_laps_pit.empty and "Team" in race_laps_pit.columns:
+            for (year, gp), group in race_laps_pit.groupby(["year", "gp"]):
+                for driver_code, dlaps in group.groupby("Driver"):
+                    driver_id = driver_code_map.get(driver_code)
+                    if not driver_id:
+                        continue
+                    team = dlaps["Team"].iloc[0]
+                    race_key = (int(year), int(gp))
+                    rg = race_groups.get(race_key)
+                    if rg is not None:
+                        match = rg[rg["driver_id"] == driver_id]
+                        if not match.empty:
+                            cid = match.iloc[0].get("constructor_id")
+                            if cid:
+                                _fastf1_team_to_constructor[(int(year), int(gp), team)] = cid
+
+    # Pre-index pit stop stats by (season, round) for O(1) race lookup
+    _pit_stop_by_race: dict[tuple[int, int], list[tuple]] = {}
+    for pit_key in pit_stop_stats:
+        race_key = (pit_key[0], pit_key[1])
+        _pit_stop_by_race.setdefault(race_key, []).append(pit_key)
 
     # Group qualifying by (season, round) and index by driver_id
     # Take the best position if duplicates exist (regular Q + sprint Q mixed)
@@ -654,6 +798,12 @@ def build_feature_matrix(
     constructor_season_positions: dict[tuple[str, int], list[float]] = {}
     # Teammate qualifying H2H tracker: driver_id -> list of 1/0 (beat teammate or not) per season
     driver_quali_h2h: dict[str, list[int]] = {}
+    # Career race counter: driver_id -> total races seen
+    driver_career_races: dict[str, int] = {}
+    # Constructor pace per circuit type: (constructor_id, season) -> {circuit_type: [positions]}
+    constructor_pace_by_circuit_type: dict[tuple[str, int], dict[str, list[float]]] = {}
+    # Team pit stop history: (team_name) -> list of {pit_time_avg, clean_pct}
+    team_pit_stop_history: dict[str, list[dict]] = {}
 
     for _, race_info in unique_races.iterrows():
         season = int(race_info["season"])
@@ -676,6 +826,20 @@ def build_feature_matrix(
         field_elo_mean = np.mean(field_elo_values) if field_elo_values else 1500.0
         # Sort ascending for O(log n) rank via bisect
         field_elo_sorted_asc = sorted(field_elo_values)
+
+        # Pre-compute championship leader points once per race (not per driver)
+        _prev_key = None
+        _leader_points = None
+        if has_standings:
+            if rnd > 1:
+                _prev_key = (season, rnd - 1)
+            else:
+                prev_season_max = standings_max_round.get(season - 1)
+                _prev_key = (season - 1, prev_season_max) if prev_season_max else None
+            if _prev_key and _prev_key in driver_standings_index:
+                _leader_points = max(
+                    s["points"] for s in driver_standings_index[_prev_key].values()
+                )
 
         for _, row in race_data.iterrows():
             driver_id = row["driver_id"]
@@ -775,23 +939,13 @@ def build_feature_matrix(
 
             # ── Championship Standings (PREVIOUS round — no leakage) ──
             if has_standings:
-                # Use previous round's standings; for round 1, use final round of previous season
-                if rnd > 1:
-                    prev_key = (season, rnd - 1)
-                else:
-                    prev_season_max = standings_max_round.get(season - 1)
-                    prev_key = (season - 1, prev_season_max) if prev_season_max else None
-
-                if prev_key and prev_key in driver_standings_index:
-                    driver_standing = driver_standings_index[prev_key].get(driver_id)
+                if _prev_key and _prev_key in driver_standings_index:
+                    driver_standing = driver_standings_index[_prev_key].get(driver_id)
                     if driver_standing:
                         features["championship_position"] = driver_standing["position"]
                         features["championship_points"] = driver_standing["points"]
-                        # Points gap to leader
-                        leader_points = max(
-                            s["points"] for s in driver_standings_index[prev_key].values()
-                        )
-                        features["points_to_leader"] = leader_points - driver_standing["points"]
+                        if _leader_points is not None:
+                            features["points_to_leader"] = _leader_points - driver_standing["points"]
                         # Title contender: within mathematical contention
                         # Rough estimate: remaining_races * 26 (max points per race)
                         total_rounds_this_season = standings_max_round.get(season)
@@ -918,11 +1072,8 @@ def build_feature_matrix(
                 features["constructor_season_avg"] = np.mean(constructor_results)
 
             # ── DNF Risk Indicators (list ops, no DataFrame overhead) ──
-            history = driver_history.get(driver_id, [])
+            # dnf_rate_last20 already computed in rolling stats above
             if history:
-                recent20 = history[-20:]
-                features["dnf_rate_last20"] = np.mean([h["dnf"] for h in recent20])
-                # Recent DNF streak (consecutive DNFs at end)
                 dnf_streak = 0
                 for h in reversed(history):
                     if h["dnf"] == 1:
@@ -930,13 +1081,11 @@ def build_feature_matrix(
                     else:
                         break
                 features["dnf_streak"] = dnf_streak
-                # Circuit-specific DNF rate
                 circuit_dnfs = [h["dnf"] for h in history if h["circuit_id"] == circuit_id]
                 if len(circuit_dnfs) >= 2:
                     features["circuit_dnf_rate"] = np.mean(circuit_dnfs)
 
             # ── Teammate Comparison Features ──
-            history = driver_history.get(driver_id, [])
             # Find teammate: same constructor_id in this race
             teammate_id = None
             for _, mate_row in race_data.iterrows():
@@ -1003,6 +1152,66 @@ def build_feature_matrix(
                     season_avg = np.mean(season_positions)
                     features["form_vs_season_avg"] = rolling3 - season_avg
 
+            # ── Grid × Circuit Type Interaction Features ──
+            if grid > 0:
+                is_street = 1 if circuit_id in _STREET_CIRCUITS else 0
+                is_high_speed = 1 if circuit_id in _HIGH_SPEED_CIRCUITS else 0
+                is_technical = 1 if circuit_id in _TECHNICAL_CIRCUITS else 0
+                features["grid_x_street"] = grid * is_street
+                features["grid_x_high_speed"] = grid * is_high_speed
+                features["grid_x_technical"] = grid * is_technical
+
+            # ── Overtaking Difficulty (circuit-level historical stats) ──
+            ot_stats = circuit_overtaking.get(circuit_id)
+            if ot_stats:
+                features["circuit_overtaking_rate"] = ot_stats["avg_positions_gained"]
+                # Expected grid delta: historical avg finish from this grid slot
+                if grid > 0:
+                    expected_finish = ot_stats["grid_finish_map"].get(grid)
+                    if expected_finish is not None:
+                        features["expected_grid_delta"] = grid - expected_finish
+
+            # ── Constructor Upgrade Detection ──
+            c_key_ct = (constructor_id, season)
+            c_results = constructor_season_positions.get(c_key_ct, [])
+            if len(c_results) >= 4:
+                season_avg_c = np.mean(c_results)
+                last2_avg = np.mean(c_results[-2:])
+                # Pace jump: sudden improvement > 0.3 positions vs season average
+                pace_jump_val = season_avg_c - last2_avg  # positive = improved
+                features["constructor_pace_jump"] = 1.0 if pace_jump_val > 0.3 else 0.0
+                features["constructor_pace_jump_magnitude"] = pace_jump_val
+
+            # Pace vs previous similar circuit type
+            ct_history = constructor_pace_by_circuit_type.get(c_key_ct, {})
+            ct_positions = ct_history.get(ct, [])
+            if ct_positions:
+                features["constructor_pace_vs_prev_similar"] = np.mean(ct_positions)
+
+            # ── Cold Start / Rookie Handling ──
+            career_count = driver_career_races.get(driver_id, 0)
+            features["career_races"] = career_count
+            features["is_rookie"] = 1 if career_count < 5 else 0
+
+            # Teammate ELO as a prior for rookies (useful when driver has no history)
+            if teammate_id is not None:
+                mate_elo_obj = elo.overall.get(teammate_id)
+                features["teammate_elo_overall"] = mate_elo_obj.rating if mate_elo_obj else 1500.0
+
+            # ── Pit Stop Performance (team-level from FastF1 stint data) ──
+            if has_pit_stops:
+                team_name = row.get("constructor_id", "unknown")
+                # Use team pit stop history (last 5 races, from previous races)
+                pit_hist = team_pit_stop_history.get(team_name, [])
+                if pit_hist:
+                    recent_pits = pit_hist[-5:]
+                    features["avg_pit_stop_time"] = np.mean(
+                        [h["pit_time_avg"] for h in recent_pits]
+                    )
+                    features["pit_stop_reliability"] = np.mean(
+                        [h["clean_pct"] for h in recent_pits]
+                    )
+
             # ── Target Variable ──
             features["position"] = row.get("position")
             features["points"] = row.get("points", 0)
@@ -1064,6 +1273,26 @@ def build_feature_matrix(
                 if my_quali is not None and mate_quali is not None:
                     driver_quali_h2h.setdefault(driver_id, []).append(
                         1 if my_quali < mate_quali else 0
+                    )
+
+            # Update career race counter (after feature extraction — no leakage)
+            driver_career_races[driver_id] = driver_career_races.get(driver_id, 0) + 1
+
+            # Update constructor pace by circuit type (after feature extraction)
+            if pos is not None and not np.isnan(pos):
+                constructor_pace_by_circuit_type.setdefault(
+                    (constructor_id, season), {}
+                ).setdefault(ct, []).append(pos)
+
+        # Update team pit stop history once per race (after all drivers processed)
+        if has_pit_stops:
+            race_pit_keys = _pit_stop_by_race.get((season, rnd), [])
+            for pit_key in race_pit_keys:
+                fastf1_team = pit_key[2]
+                cid = _fastf1_team_to_constructor.get((season, rnd, fastf1_team))
+                if cid:
+                    team_pit_stop_history.setdefault(cid, []).append(
+                        pit_stop_stats[pit_key]
                     )
 
         # Update ELO AFTER extracting features (no data leakage)

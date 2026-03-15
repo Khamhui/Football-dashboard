@@ -51,6 +51,12 @@ TEAM_SHORT = {
     "audi": "Audi", "cadillac": "Cadillac",
 }
 
+# Circuit type display names (distinct from data/features/elo.py CIRCUIT_TYPES which maps circuit_id → type)
+CIRCUIT_TYPE_LABELS = {
+    "street": "Street", "high_speed": "High-Speed",
+    "technical": "Technical", "mixed": "Mixed",
+}
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

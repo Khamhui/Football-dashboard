@@ -2,11 +2,13 @@
 Main F1 prediction pipeline — end-to-end from data ingestion to trained model.
 
 Usage:
-    python -m data.pipeline --step ingest     # Download all historical data
-    python -m data.pipeline --step features   # Build feature matrix
-    python -m data.pipeline --step train      # Train prediction models
-    python -m data.pipeline --step all        # Run everything
-    python -m data.pipeline --step predict    # Predict next race
+    python -m data.pipeline --step ingest      # Download all historical data
+    python -m data.pipeline --step features    # Build feature matrix
+    python -m data.pipeline --step train       # Train prediction models
+    python -m data.pipeline --step predict     # Predict next race
+    python -m data.pipeline --step calibrate   # Verify model calibration
+    python -m data.pipeline --step odds        # Fetch betting odds
+    python -m data.pipeline --step all         # Run everything (except calibrate/odds)
 """
 
 import argparse
@@ -138,17 +140,68 @@ def step_predict():
     logger.info("To predict a specific upcoming race, use the notebook interface.")
 
 
+def step_calibrate(test_seasons: list[int] = None):
+    """Step 5: Evaluate model calibration on historical predictions."""
+    from data.models.calibration import evaluate_model_calibration, print_calibration_report
+
+    logger.info("=" * 60)
+    logger.info("STEP 5: Calibration Verification")
+    logger.info("=" * 60)
+
+    feature_matrix = pd.read_parquet(DATA_DIR / "feature_matrix.parquet")
+
+    if test_seasons is None:
+        max_season = int(feature_matrix["season"].max())
+        test_seasons = [max_season - 1, max_season]
+        logger.info(f"No test seasons specified, using {test_seasons}")
+
+    report = evaluate_model_calibration(feature_matrix, test_seasons=test_seasons)
+    print_calibration_report(report)
+
+    logger.info("\nCalibration verification complete.")
+    return report
+
+
+def step_odds(season: int = None, race_round: int = None):
+    """Step 6: Fetch and store betting odds for value detection."""
+    from data.ingest.odds import OddsClient
+
+    logger.info("=" * 60)
+    logger.info("STEP 6: Odds Ingestion")
+    logger.info("=" * 60)
+
+    client = OddsClient()
+
+    if season and race_round:
+        odds = client.fetch_race_winner_odds(season, race_round)
+        if odds is not None and not odds.empty:
+            client.save_odds(odds, season, race_round)
+            logger.info(f"Saved odds for {season} Round {race_round}: {len(odds)} drivers")
+        else:
+            logger.warning("No odds available from API. Use --odds-csv for CSV import.")
+    else:
+        odds = client.fetch_current_odds()
+        if odds is not None and not odds.empty:
+            logger.info(f"Current odds fetched: {len(odds)} drivers")
+        else:
+            logger.warning("No current odds available.")
+
+    return odds
+
+
 def main():
     parser = argparse.ArgumentParser(description="F1 Prediction Pipeline")
     parser.add_argument(
         "--step",
-        choices=["ingest", "features", "train", "predict", "all"],
+        choices=["ingest", "features", "train", "predict", "calibrate", "odds", "all"],
         default="all",
         help="Pipeline step to run",
     )
     parser.add_argument("--start-year", type=int, default=2003)
     parser.add_argument("--end-year", type=int, default=2025)
     parser.add_argument("--test-seasons", type=int, nargs="+", default=None)
+    parser.add_argument("--odds-season", type=int, default=None)
+    parser.add_argument("--odds-round", type=int, default=None)
     parser.add_argument("--verbose", "-v", action="store_true")
 
     args = parser.parse_args()
@@ -169,6 +222,12 @@ def main():
 
     if args.step in ("predict", "all"):
         step_predict()
+
+    if args.step == "calibrate":
+        step_calibrate(args.test_seasons)
+
+    if args.step == "odds":
+        step_odds(args.odds_season, args.odds_round)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
 import feedparser
 import pandas as pd
@@ -58,115 +59,205 @@ app.jinja_env.globals.update(
 )
 
 
+def _pos_class(pos) -> str:
+    """Return CSS class for a finishing position."""
+    try:
+        p = int(pos)
+    except (TypeError, ValueError):
+        return "dim"
+    return {1: "p1", 2: "p2", 3: "p3"}.get(p, "dim")
+
+
+def _delta_class(val) -> str:
+    """Return CSS class for a +/- delta value."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return "dim"
+    if v > 0:
+        return "gain"
+    if v < 0:
+        return "drop"
+    return "dim"
+
+
+def _na(val, default=""):
+    """Return default if val is NaN/None, else val."""
+    try:
+        if val != val:  # NaN check
+            return default
+    except (TypeError, ValueError):
+        pass
+    if val is None:
+        return default
+    return val
+
+
+app.jinja_env.filters["pos_class"] = _pos_class
+app.jinja_env.filters["delta_class"] = _delta_class
+app.jinja_env.filters["na"] = _na
+
+
+def _filter_round(df: pd.DataFrame, season: int, race_round: int) -> pd.DataFrame:
+    """Filter a results DataFrame to a specific season/round."""
+    if df.empty:
+        return pd.DataFrame()
+    return df[(df["season"] == season) & (df["round"] == race_round)].sort_values("position")
+
+
+def _latest_standings(df: pd.DataFrame, season: int) -> pd.DataFrame:
+    """Get latest standings for a season, sorted by points."""
+    s = df[df["season"] == season]
+    if s.empty:
+        return pd.DataFrame()
+    latest_round = s["round"].max()
+    s = s[s["round"] == latest_round].sort_values("points", ascending=False)
+    s["position"] = range(1, len(s) + 1)
+    return s
+
+
+def _event_name_from(rr: pd.DataFrame, season: int, race_round: int) -> str:
+    """Extract event name from already-loaded race_results, falling back to shared helper."""
+    if not rr.empty and "race_name" in rr.columns:
+        match = rr[(rr["season"] == season) & (rr["round"] == race_round)]
+        if not match.empty:
+            name = match.iloc[0]["race_name"]
+            if pd.notna(name):
+                return name
+    return get_event_name(season, race_round)
+
+
+def _build_elo_data(fm: pd.DataFrame, current: pd.DataFrame, season: int, race_round: int) -> dict:
+    """Extract ELO rankings and sparkline history from feature matrix."""
+    if fm.empty or "elo_overall" not in fm.columns:
+        return {"driver_elo": pd.DataFrame(), "constructor_elo_map": {}, "elo_history": {}, "circuit_type": "mixed"}
+
+    # Fall back to latest available race if current slice is empty
+    if current.empty:
+        current = fm[fm["season"] == season]
+        if not current.empty:
+            current = current[current["round"] == current["round"].max()]
+
+    # Driver ELO table
+    elo_cols = ["driver_id", "constructor_id", "elo_overall", "elo_qualifying", "elo_circuit_type", "elo_constructor"]
+    available_cols = [c for c in elo_cols if c in current.columns]
+    driver_elo = current[available_cols].copy() if not current.empty else pd.DataFrame()
+    if not driver_elo.empty:
+        driver_elo = driver_elo.sort_values("elo_overall", ascending=False).reset_index(drop=True)
+        driver_elo["elo_rank"] = range(1, len(driver_elo) + 1)
+
+    # Constructor ELO as dict for O(1) template lookups
+    constructor_elo_map: dict[str, int] = {}
+    if not current.empty and "elo_constructor" in current.columns:
+        constructor_elo_map = (
+            current.groupby("constructor_id")["elo_constructor"]
+            .max()
+            .round()
+            .astype(int)
+            .to_dict()
+        )
+
+    # Sparkline history: last 10 races per driver (single groupby, no N+1)
+    elo_history = {}
+    if not current.empty:
+        driver_ids = set(current["driver_id"].unique())
+        recent = fm[fm["season"] <= season]
+        recent = recent[recent["driver_id"].isin(driver_ids)]
+        if season == fm["season"].max():
+            recent = recent[~((recent["season"] == season) & (recent["round"] > race_round))]
+        recent = recent.sort_values(["season", "round"])
+        for did, group in recent.groupby("driver_id"):
+            vals = group["elo_overall"].dropna().tail(10).tolist()
+            if len(vals) >= 2:
+                elo_history[did] = vals
+
+    # Circuit type for this race
+    circuit_type = "mixed"
+    if not current.empty and "circuit_type" in current.columns:
+        ct = current.iloc[0].get("circuit_type", "mixed")
+        circuit_type = ct if pd.notna(ct) else "mixed"
+
+    return {
+        "driver_elo": driver_elo,
+        "constructor_elo_map": constructor_elo_map,
+        "elo_history": elo_history,
+        "circuit_type": circuit_type,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 @app.route("/")
 def index():
-    """Predictions dashboard — main page."""
+    """Single-page terminal dashboard — all data in one view."""
     preds = available_predictions()
-    if not preds:
-        return render_template("predictions.html", pred=None, event_name="No predictions yet", season=0, race_round=0, available=preds)
 
     season = request.args.get("season", type=int)
     race_round = request.args.get("round", type=int)
 
-    if not season or not race_round:
+    if (not season or not race_round) and preds:
         season, race_round, _ = preds[0]
+    elif not season:
+        season, race_round = 2026, 1
 
+    # Feature matrix (used for predictions context + ELO)
+    fm = _load("feature_matrix")
+
+    # Pre-compute the current race slice (used by both prediction merge and ELO)
+    if not fm.empty:
+        current = fm[(fm["season"] == season) & (fm["round"] == race_round)]
+    else:
+        current = pd.DataFrame()
+
+    # Prediction
     pred = load_prediction(season, race_round)
-    event = get_event_name(season, race_round)
 
-    # Merge team/grid context only if prediction exists
-    if pred is not None:
-        fm = _load("feature_matrix")
-        ctx = fm[(fm["season"] == season) & (fm["round"] == race_round)][["driver_id", "constructor_id", "grid"]]
-        if not ctx.empty:
-            pred = pred.merge(ctx, on="driver_id", how="left")
+    if pred is not None and not current.empty:
+        ctx = current[["driver_id", "constructor_id", "grid"]]
+        pred = pred.merge(ctx, on="driver_id", how="left")
 
-    return render_template(
-        "predictions.html",
-        pred=pred,
-        event_name=event,
-        season=season,
-        race_round=race_round,
-        available=preds,
-    )
+    # Pre-sort DNF for chart (avoid sort_values in Jinja template)
+    dnf_sorted = None
+    if pred is not None and "sim_dnf_pct" in pred.columns:
+        dnf_sorted = pred.sort_values("sim_dnf_pct", ascending=False)
 
-
-@app.route("/results")
-def results():
-    """Race results history."""
+    # Results (qualifying, sprint, race)
     rr = _load("race_results")
     q = _load("qualifying")
     sp = _load("sprints")
 
-    seasons = sorted(rr["season"].unique(), reverse=True) if not rr.empty else [2026]
-    season = request.args.get("season", type=int, default=seasons[0])
+    race = _filter_round(rr, season, race_round)
+    quali = _filter_round(q, season, race_round)
+    sprint = _filter_round(sp, season, race_round)
 
-    season_results = rr[rr["season"] == season].sort_values(["round", "position"])
-    rounds = sorted(season_results["round"].unique())
+    # Event name from already-loaded race_results
+    event = _event_name_from(rr, season, race_round)
 
-    race_round = request.args.get("round", type=int, default=int(rounds[-1]) if rounds else 1)
+    # Standings
+    driver_s = _latest_standings(_load("driver_standings"), season)
+    constructor_s = _latest_standings(_load("constructor_standings"), season)
 
-    race = season_results[season_results["round"] == race_round].sort_values("position")
-    quali = q[(q["season"] == season) & (q["round"] == race_round)].sort_values("position")
-    sprint = sp[(sp["season"] == season) & (sp["round"] == race_round)].sort_values("position") if not sp.empty else pd.DataFrame()
-
-    event = get_event_name(season, race_round)
+    # ELO data
+    elo_data = _build_elo_data(fm, current, season, race_round)
 
     return render_template(
-        "results.html",
-        race=race,
-        quali=quali,
-        sprint=sprint,
+        "terminal.html",
+        pred=pred,
+        dnf_sorted=dnf_sorted,
         event_name=event,
         season=season,
         race_round=race_round,
-        rounds=rounds,
-        seasons=seasons,
-    )
-
-
-@app.route("/standings")
-def standings():
-    """Championship standings."""
-    ds = _load("driver_standings")
-    cs = _load("constructor_standings")
-
-    seasons = sorted(ds["season"].unique(), reverse=True) if not ds.empty else [2026]
-    season = request.args.get("season", type=int, default=seasons[0])
-
-    driver_s = ds[ds["season"] == season]
-    if not driver_s.empty:
-        latest_round = driver_s["round"].max()
-        driver_s = driver_s[driver_s["round"] == latest_round].sort_values("points", ascending=False)
-        driver_s["position"] = range(1, len(driver_s) + 1)
-    else:
-        driver_s = pd.DataFrame()
-
-    constructor_s = cs[cs["season"] == season]
-    if not constructor_s.empty:
-        latest_round = constructor_s["round"].max()
-        constructor_s = constructor_s[constructor_s["round"] == latest_round].sort_values("points", ascending=False)
-        constructor_s["position"] = range(1, len(constructor_s) + 1)
-    else:
-        constructor_s = pd.DataFrame()
-
-    return render_template(
-        "standings.html",
+        available=preds,
+        race=race,
+        quali=quali,
+        sprint=sprint,
         drivers=driver_s,
         constructors=constructor_s,
-        season=season,
-        seasons=seasons,
+        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        **elo_data,
     )
-
-
-@app.route("/news")
-def news():
-    """RSS news feed."""
-    return render_template("news.html")
 
 
 # RSS cache — avoid re-fetching on every page load
