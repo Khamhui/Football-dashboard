@@ -141,6 +141,131 @@ class OddsClient:
 
         return df
 
+    def fetch_historical_odds(self, season: int, event_id: str) -> pd.DataFrame:
+        """
+        Fetch historical odds from The Odds API.
+
+        The Odds API historical endpoint: /v4/historical/sports/{sport}/odds
+        Requires: date parameter (ISO 8601 format).
+
+        This uses the historical odds endpoint which may require a paid plan.
+        Falls back gracefully if not available.
+
+        Args:
+            season: Championship year (used for logging/context)
+            event_id: ISO 8601 date string (e.g. "2025-03-16T12:00:00Z")
+                      representing a point before the race start.
+
+        Returns:
+            DataFrame with standard odds columns, or empty DataFrame on failure.
+        """
+        try:
+            data = self._get(
+                f"historical/sports/{SPORT_KEY}/odds",
+                params={
+                    "regions": "eu",
+                    "markets": "h2h",
+                    "oddsFormat": "decimal",
+                    "date": event_id,
+                },
+            )
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (401, 403, 422):
+                logger.warning(
+                    "Historical odds not available (plan limitation?) for %s: %s",
+                    event_id, e,
+                )
+            else:
+                logger.warning("Historical odds request failed for %s: %s", event_id, e)
+            return pd.DataFrame(
+                columns=["driver_id", "bookmaker", "decimal_odds", "implied_prob", "fair_prob"]
+            )
+        except Exception as e:
+            logger.warning("Historical odds request failed for %s: %s", event_id, e)
+            return pd.DataFrame(
+                columns=["driver_id", "bookmaker", "decimal_odds", "implied_prob", "fair_prob"]
+            )
+
+        # The historical endpoint wraps data inside a "data" key
+        odds_data = data.get("data", data) if isinstance(data, dict) else data
+        if isinstance(odds_data, dict):
+            odds_data = odds_data.get("data", [])
+        if not isinstance(odds_data, list):
+            odds_data = []
+
+        if not odds_data:
+            logger.info("No historical odds returned for %s (season %d)", event_id, season)
+            return pd.DataFrame(
+                columns=["driver_id", "bookmaker", "decimal_odds", "implied_prob", "fair_prob"]
+            )
+
+        return self._parse_odds_response(odds_data)
+
+    def backfill_season(self, season: int) -> dict:
+        """
+        Attempt to fetch odds for all races in a season.
+
+        Gets race dates from the cached race_results parquet, then fetches
+        historical odds for each race date (morning before the race).
+
+        Returns:
+            dict of {round_number: DataFrame or None}
+        """
+        results_path = CACHE_DIR / "race_results.parquet"
+        if not results_path.exists():
+            logger.error("race_results.parquet not found — run the ingest pipeline first")
+            return {}
+
+        rr = pd.read_parquet(results_path)
+        season_races = rr[rr["season"] == season]
+
+        if season_races.empty:
+            logger.error("No race data found for season %d", season)
+            return {}
+
+        # Build unique (round, date) pairs
+        race_schedule = (
+            season_races.groupby("round")
+            .agg(date=("date", "first"))
+            .reset_index()
+            .sort_values("round")
+        )
+
+        backfill_results = {}
+        for _, row in race_schedule.iterrows():
+            rnd = int(row["round"])
+            race_date = str(row["date"])
+
+            # Skip if already cached
+            cached = self.load_odds(season, rnd)
+            if cached is not None and not cached.empty:
+                logger.info("Round %d already cached (%d rows) — skipping", rnd, len(cached))
+                backfill_results[rnd] = cached
+                continue
+
+            # Build ISO 8601 timestamp: morning of race day (08:00 UTC)
+            # This captures pre-race odds before the market closes
+            date_str = race_date[:10]  # YYYY-MM-DD
+            event_id = f"{date_str}T08:00:00Z"
+
+            logger.info("Backfilling Round %d (date=%s)...", rnd, date_str)
+            odds = self.fetch_historical_odds(season, event_id)
+
+            if odds is not None and not odds.empty:
+                self.save_odds(odds, season, rnd)
+                backfill_results[rnd] = odds
+                logger.info("  Round %d: %d rows saved", rnd, len(odds))
+            else:
+                backfill_results[rnd] = None
+                logger.info("  Round %d: no odds available", rnd)
+
+        # Summary
+        found = sum(1 for v in backfill_results.values() if v is not None)
+        total = len(backfill_results)
+        logger.info("Backfill complete: %d/%d rounds with odds", found, total)
+
+        return backfill_results
+
     def _parse_odds_response(self, data: list[dict]) -> pd.DataFrame:
         """Parse The Odds API JSON into a standardised DataFrame."""
         rows = []
@@ -351,19 +476,99 @@ class OddsClient:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    import argparse
 
-    client = OddsClient()
+    parser = argparse.ArgumentParser(
+        description="F1 Betting Odds Ingestion",
+        prog="python -m data.ingest.odds",
+    )
+    parser.add_argument(
+        "--backfill", type=int, metavar="SEASON",
+        help="Attempt historical odds backfill for an entire season",
+    )
+    parser.add_argument(
+        "--clv", type=int, metavar="SEASON",
+        help="Evaluate CLV (Closing Line Value) for a season",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true")
 
-    if client.api_key:
-        print("Fetching current odds from The Odds API...")
-        df = client.fetch_current_odds()
-        if not df.empty:
-            consensus = client.consensus_odds(df)
-            print("\nConsensus market probabilities:")
-            print(consensus.to_string(index=False))
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    if args.clv:
+        # CLV evaluation mode
+        from data.models.value import evaluate_season_clv
+        import json
+
+        print(f"Evaluating CLV for season {args.clv}...")
+        report = evaluate_season_clv(args.clv)
+
+        if report.get("error"):
+            print(f"Error: {report['error']}")
         else:
-            print("No odds returned (no upcoming race?)")
+            print(f"\nSeason {args.clv} CLV Report")
+            print("=" * 50)
+            print(f"  Races evaluated:  {report.get('races_evaluated', 0)}")
+            print(f"  Total bets:       {report.get('n_bets', 0)}")
+
+            if report.get("n_bets", 0) > 0:
+                print(f"  Avg CLV:          {report.get('avg_clv', 0):+.4f}")
+                print(f"  CLV hit rate:     {report.get('clv_hit_rate', 0):.1%}")
+                print(f"  Brier (model):    {report.get('brier_model', 0):.6f}")
+                print(f"  Brier (market):   {report.get('brier_closing', 0):.6f}")
+                print(f"  Brier advantage:  {report.get('brier_advantage', 0):+.6f}")
+
+            if report.get("per_race"):
+                print(f"\nPer-race Brier scores:")
+                for r in report["per_race"]:
+                    adv = r["brier_market"] - r["brier_model"]
+                    marker = "+" if adv > 0 else " "
+                    print(
+                        f"  {r['race_id']}: model={r['brier_model']:.4f}  "
+                        f"market={r['brier_market']:.4f}  "
+                        f"advantage={marker}{adv:.4f}  winner={r['winner']}"
+                    )
+
+    elif args.backfill:
+        # Historical backfill mode
+        client = OddsClient()
+        if not client.api_key:
+            print("ODDS_API_KEY required for backfill.")
+            print("Example: ODDS_API_KEY=abc123 python -m data.ingest.odds --backfill 2025")
+            raise SystemExit(1)
+
+        print(f"Backfilling odds for season {args.backfill}...")
+        results = client.backfill_season(args.backfill)
+
+        found = sum(1 for v in results.values() if v is not None)
+        print(f"\nBackfill complete: {found}/{len(results)} rounds with odds")
+
+        for rnd in sorted(results.keys()):
+            df = results[rnd]
+            if df is not None:
+                consensus = client.consensus_odds(df)
+                top = consensus.head(3)["driver_id"].tolist()
+                print(f"  R{rnd:02d}: {len(df)} rows — top 3: {', '.join(top)}")
+            else:
+                print(f"  R{rnd:02d}: no odds available")
+
     else:
-        print("ODDS_API_KEY not set. Use import_csv() or set the env var.")
-        print("Example: ODDS_API_KEY=abc123 python -m data.ingest.odds")
+        # Default: fetch current race odds
+        client = OddsClient()
+
+        if client.api_key:
+            print("Fetching current odds from The Odds API...")
+            df = client.fetch_current_odds()
+            if not df.empty:
+                consensus = client.consensus_odds(df)
+                print("\nConsensus market probabilities:")
+                print(consensus.to_string(index=False))
+            else:
+                print("No odds returned (no upcoming race?)")
+        else:
+            print("ODDS_API_KEY not set. Use import_csv() or set the env var.")
+            print("Example: ODDS_API_KEY=abc123 python -m data.ingest.odds")

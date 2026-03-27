@@ -11,13 +11,17 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+MODEL_DIR = Path(__file__).parent.parent / "cache" / "models"
 
 
 def brier_score(predicted_probs: np.ndarray, actual_outcomes: np.ndarray) -> float:
@@ -40,6 +44,169 @@ def brier_score(predicted_probs: np.ndarray, actual_outcomes: np.ndarray) -> flo
         raise ValueError("predicted_probs and actual_outcomes must have the same length")
 
     return float(np.mean((predicted_probs - actual_outcomes) ** 2))
+
+
+class CLVTracker:
+    """
+    Closing Line Value tracker — the gold standard metric for betting edge.
+
+    CLV measures whether you consistently get prices better than the closing
+    line. If you do, you have an edge — even if short-term P&L is negative.
+
+    Pinnacle closing lines show r²=0.997 correlation with outcomes across
+    ~400k matches. Beating the closing line is the single most reliable
+    indicator of long-term profitability.
+    """
+
+    def __init__(self):
+        self.records: List[Dict] = []
+
+    def add_bet(
+        self,
+        race_id: str,
+        driver_id: str,
+        model_prob: float,
+        opening_prob: float,
+        closing_prob: float,
+        actual_outcome: int,
+    ):
+        """
+        Record a bet with opening and closing market probabilities.
+
+        Args:
+            race_id: Unique race identifier (e.g. "2026_R03")
+            driver_id: Driver identifier
+            model_prob: Model's predicted probability at time of bet
+            opening_prob: Market-implied probability when bet was placed
+            closing_prob: Market-implied probability at race start (closing line)
+            actual_outcome: 1 if the outcome occurred, 0 otherwise
+        """
+        self.records.append({
+            "race_id": race_id,
+            "driver_id": driver_id,
+            "model_prob": model_prob,
+            "opening_prob": opening_prob,
+            "closing_prob": closing_prob,
+            "actual_outcome": actual_outcome,
+        })
+
+    def compute_clv(self) -> pd.DataFrame:
+        """
+        Compute per-bet CLV metrics.
+
+        Returns:
+            DataFrame with columns: race_id, driver_id, model_prob,
+            opening_prob, closing_prob, actual_outcome, clv, clv_pct,
+            closing_moved_toward_model, cumulative_clv
+        """
+        if not self.records:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(self.records)
+
+        # CLV: how much value did we capture vs the closing line?
+        # Positive = we got a better price than closing
+        # clv = closing_prob - opening_prob (in probability space)
+        # If closing moved toward our model, we captured line movement
+        df["clv"] = df["closing_prob"] - df["opening_prob"]
+
+        # CLV as percentage of opening probability
+        df["clv_pct"] = np.where(
+            df["opening_prob"] > 0,
+            df["clv"] / df["opening_prob"],
+            0.0,
+        )
+
+        # Did the closing line move toward our model's estimate?
+        df["closing_moved_toward_model"] = (
+            (df["closing_prob"] - df["opening_prob"])
+            * np.sign(df["model_prob"] - df["opening_prob"])
+        ) > 0
+
+        # Cumulative CLV over time
+        df["cumulative_clv"] = df["clv"].cumsum()
+
+        return df
+
+    def summary(self) -> Dict:
+        """
+        Return summary CLV metrics.
+
+        Returns:
+            Dict with avg_clv, median_clv, clv_hit_rate,
+            brier_model, brier_closing, brier_advantage,
+            edge_persistence (first vs second half comparison)
+        """
+        if not self.records:
+            return {"n_bets": 0}
+
+        df = self.compute_clv()
+        n = len(df)
+
+        # Brier scores: model vs closing line
+        model_brier = brier_score(
+            df["model_prob"].values, df["actual_outcome"].values
+        )
+        closing_brier = brier_score(
+            df["closing_prob"].values, df["actual_outcome"].values
+        )
+
+        # Edge persistence: compare CLV hit rate in first half vs second half
+        mid = n // 2
+        first_half = df.iloc[:mid]
+        second_half = df.iloc[mid:]
+        first_hit = first_half["closing_moved_toward_model"].mean() if len(first_half) > 0 else 0.0
+        second_hit = second_half["closing_moved_toward_model"].mean() if len(second_half) > 0 else 0.0
+
+        return {
+            "n_bets": n,
+            "avg_clv": float(df["clv"].mean()),
+            "median_clv": float(df["clv"].median()),
+            "avg_clv_pct": float(df["clv_pct"].mean()),
+            "clv_hit_rate": float(df["closing_moved_toward_model"].mean()),
+            "brier_model": round(model_brier, 6),
+            "brier_closing": round(closing_brier, 6),
+            "brier_advantage": round(closing_brier - model_brier, 6),
+            "edge_persistence": {
+                "first_half_hit_rate": round(first_hit, 4),
+                "second_half_hit_rate": round(second_hit, 4),
+                "persistent": abs(first_hit - second_hit) < 0.15,
+            },
+        }
+
+    def save(self, path: Optional[Path] = None):
+        """Persist CLV history to JSON."""
+        path = path or MODEL_DIR / "clv_history.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.records, f, indent=2)
+        logger.info("CLV history saved to %s (%d records)", path, len(self.records))
+
+    def load(self, path: Optional[Path] = None):
+        """Load CLV history from JSON."""
+        path = path or MODEL_DIR / "clv_history.json"
+        if not path.exists():
+            logger.warning("No CLV history found at %s", path)
+            return
+        with open(path) as f:
+            self.records = json.load(f)
+        logger.info("CLV history loaded: %d records", len(self.records))
+
+
+def _raw_kelly(model_prob: float, market_prob: float) -> float:
+    """
+    Core Kelly criterion: f* = (bp - q) / b.
+
+    Returns raw (full) Kelly fraction, or 0.0 if no edge.
+    Caller is responsible for applying fractional scaling.
+    """
+    if market_prob <= 0 or market_prob >= 1 or model_prob <= 0:
+        return 0.0
+    b = (1.0 / market_prob) - 1.0  # net odds (profit per unit staked)
+    if b <= 0:
+        return 0.0
+    kelly = (b * model_prob - (1.0 - model_prob)) / b
+    return max(kelly, 0.0)
 
 
 class ValueDetector:
@@ -87,23 +254,31 @@ class ValueDetector:
         merged["edge"] = merged["model_win_pct"] - merged["market_win_pct"]
 
         # Fair odds (from model) and market odds
-        merged["fair_odds"] = merged["model_win_pct"].apply(
-            lambda p: round(1.0 / p, 2) if p > 0 else float("inf")
+        merged["fair_odds"] = np.where(
+            merged["model_win_pct"] > 0,
+            np.round(1.0 / merged["model_win_pct"], 2),
+            np.inf,
         )
-        merged["market_odds"] = merged["market_win_pct"].apply(
-            lambda p: round(1.0 / p, 2) if p > 0 else float("inf")
+        merged["market_odds"] = np.where(
+            merged["market_win_pct"] > 0,
+            np.round(1.0 / merged["market_win_pct"], 2),
+            np.inf,
         )
 
-        # Kelly fraction for each row
-        merged["kelly_fraction"] = merged.apply(
-            lambda r: self.kelly_fraction(r["model_win_pct"], r["market_win_pct"]),
-            axis=1,
-        )
+        # Kelly fraction for each row (vectorized)
+        model_p = merged["model_win_pct"].values
+        market_p = merged["market_win_pct"].values
+        decimal_odds = np.where(market_p > 0, 1.0 / market_p, 0.0)
+        b = decimal_odds - 1.0
+        kelly_full = np.where(b > 0, (b * model_p - (1.0 - model_p)) / b, 0.0)
+        kelly_full = np.maximum(kelly_full, 0.0)
+        merged["kelly_fraction"] = np.round(kelly_full * 0.25, 4)
 
         # Value rating: edge relative to market probability (how mispriced)
-        merged["value_rating"] = merged.apply(
-            lambda r: round(r["edge"] / r["market_win_pct"], 3) if r["market_win_pct"] > 0 else 0.0,
-            axis=1,
+        merged["value_rating"] = np.where(
+            merged["market_win_pct"] > 0,
+            np.round(merged["edge"] / merged["market_win_pct"], 3),
+            0.0,
         )
 
         # Filter to actionable values
@@ -140,22 +315,45 @@ class ValueDetector:
         Returns:
             Recommended stake as a fraction of bankroll (0 if no edge)
         """
-        if market_prob <= 0 or market_prob >= 1 or model_prob <= 0:
+        kelly = _raw_kelly(model_prob, market_prob)
+        if kelly <= 0:
             return 0.0
+        return round(kelly * fraction, 4)
 
-        decimal_odds = 1.0 / market_prob
-        b = decimal_odds - 1.0  # net odds (profit per unit staked)
+    @staticmethod
+    def fractional_kelly_with_uncertainty(
+        prob_lower: float,
+        prob_upper: float,
+        market_prob: float,
+        fraction: float = 0.25,
+    ) -> float:
+        """
+        Kelly criterion using Venn-ABERS prediction intervals.
 
-        if b <= 0:
-            return 0.0
+        Standard Kelly assumes exact probability estimates, which leads to
+        overbetting when estimates are uncertain. This version uses the
+        conservative (lower) bound from Venn-ABERS, plus a confidence
+        penalty based on interval width.
 
-        # Kelly formula: f* = (bp - q) / b  where p = model_prob, q = 1 - p
-        kelly = (b * model_prob - (1.0 - model_prob)) / b
+        Args:
+            prob_lower: Lower bound of Venn-ABERS interval
+            prob_upper: Upper bound of Venn-ABERS interval
+            market_prob: Market-implied probability
+            fraction: Base Kelly fraction (default 0.25 = quarter Kelly)
 
+        Returns:
+            Recommended stake as fraction of bankroll (0 if no edge)
+        """
+        kelly = _raw_kelly(prob_lower, market_prob)
         if kelly <= 0:
             return 0.0
 
-        return round(kelly * fraction, 4)
+        # Confidence penalty: wider interval = less confident = smaller stake
+        # Interval width of 0 = full fraction, width of 0.5+ = near-zero stake
+        interval_width = max(0.0, prob_upper - prob_lower)
+        confidence = max(0.0, 1.0 - 2.0 * interval_width)
+
+        return round(kelly * fraction * confidence, 4)
 
     def track_performance(
         self,
@@ -258,6 +456,139 @@ class ValueDetector:
             "brier_market": round(brier_market, 6),
             "brier_advantage": round(brier_market - brier_model, 6),
         }
+
+
+CACHE_DIR = Path(__file__).parent.parent / "cache" / "processed"
+
+
+def evaluate_season_clv(season: int) -> dict:
+    """
+    Load all predictions, odds, and results for a season.
+    Compute CLV metrics for each race where all three are available.
+
+    Returns comprehensive CLV report with per-race and aggregate metrics.
+    """
+    # 1. Find prediction CSVs
+    pred_files = sorted(CACHE_DIR.glob(f"prediction_{season}_R*.csv"))
+    if not pred_files:
+        logger.warning("No prediction files found for season %d", season)
+        return {"season": season, "error": "no_predictions", "races": []}
+
+    # 2. Find odds parquets
+    odds_files = sorted(CACHE_DIR.glob(f"odds_{season}_R*.parquet"))
+    odds_by_round: Dict[int, pd.DataFrame] = {}
+    for f in odds_files:
+        # Extract round number from filename: odds_2026_R03.parquet
+        rnd = int(f.stem.split("_R")[1])
+        odds_by_round[rnd] = pd.read_parquet(f)
+
+    # 3. Load race results
+    rr_path = CACHE_DIR / "race_results.parquet"
+    if not rr_path.exists():
+        logger.warning("race_results.parquet not found")
+        return {"season": season, "error": "no_results", "races": []}
+
+    rr = pd.read_parquet(rr_path)
+    season_results = rr[(rr["season"] == season) & rr["position"].notna()]
+
+    # Build winner lookup: round -> driver_id
+    winners: Dict[int, str] = {}
+    for rnd, group in season_results.groupby("round"):
+        top = group[group["position"] == group["position"].min()]
+        if not top.empty:
+            winners[int(rnd)] = top.iloc[0]["driver_id"]
+
+    # 4. For each race with all three, compute CLV
+    from data.ingest.odds import OddsClient
+
+    tracker = CLVTracker()
+    per_race = []
+    races_used = 0
+
+    for pred_file in pred_files:
+        rnd = int(pred_file.stem.split("_R")[1].replace(".csv", ""))
+        race_id = f"{season}_R{rnd:02d}"
+
+        if rnd not in odds_by_round:
+            continue
+        if rnd not in winners:
+            continue
+
+        preds = pd.read_csv(pred_file)
+        odds_df = odds_by_round[rnd]
+
+        # Get consensus market probabilities
+        consensus = OddsClient.consensus_odds(odds_df)
+        if consensus.empty:
+            continue
+
+        winner_id = winners[rnd]
+        races_used += 1
+
+        # Merge prediction probs with market probs
+        prob_col = "sim_win_pct" if "sim_win_pct" in preds.columns else "prob_winner"
+        if prob_col not in preds.columns:
+            continue
+
+        for _, row in preds.iterrows():
+            driver_id = row.get("driver_id")
+            model_prob = row.get(prob_col, 0)
+            if prob_col == "sim_win_pct":
+                model_prob = model_prob / 100.0  # convert percentage to proportion
+
+            market_row = consensus[consensus["driver_id"] == driver_id]
+            if market_row.empty:
+                continue
+
+            market_prob = float(market_row.iloc[0]["market_win_pct"])
+            actual = 1 if driver_id == winner_id else 0
+
+            # Use market prob as both opening and closing (single snapshot)
+            tracker.add_bet(
+                race_id=race_id,
+                driver_id=driver_id,
+                model_prob=model_prob,
+                opening_prob=market_prob,
+                closing_prob=market_prob,
+                actual_outcome=actual,
+            )
+
+        # Per-race Brier comparison
+        race_preds_merged = preds.merge(
+            consensus[["driver_id", "market_win_pct"]], on="driver_id", how="inner"
+        )
+        if not race_preds_merged.empty and prob_col in race_preds_merged.columns:
+            model_probs = race_preds_merged[prob_col].values
+            if prob_col == "sim_win_pct":
+                model_probs = model_probs / 100.0
+            market_probs = race_preds_merged["market_win_pct"].values
+            outcomes = np.array([
+                1.0 if d == winner_id else 0.0
+                for d in race_preds_merged["driver_id"]
+            ])
+            per_race.append({
+                "race_id": race_id,
+                "round": rnd,
+                "winner": winner_id,
+                "n_drivers": len(race_preds_merged),
+                "brier_model": round(brier_score(model_probs, outcomes), 6),
+                "brier_market": round(brier_score(market_probs, outcomes), 6),
+            })
+
+    # 5. Aggregate
+    summary = tracker.summary()
+    summary["season"] = season
+    summary["races_evaluated"] = races_used
+    summary["per_race"] = per_race
+
+    if per_race:
+        avg_model_brier = np.mean([r["brier_model"] for r in per_race])
+        avg_market_brier = np.mean([r["brier_market"] for r in per_race])
+        summary["avg_race_brier_model"] = round(avg_model_brier, 6)
+        summary["avg_race_brier_market"] = round(avg_market_brier, 6)
+        summary["avg_race_brier_advantage"] = round(avg_market_brier - avg_model_brier, 6)
+
+    return summary
 
 
 if __name__ == "__main__":

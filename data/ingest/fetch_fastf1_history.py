@@ -94,19 +94,35 @@ def merge_into_existing(new_laps: pd.DataFrame, year: int):
     logger.info("Saved %d total laps to %s", len(combined), LAPS_PATH.name)
 
 
-def fetch_all(start_year: int = 2018, end_year: int = 2025):
-    """Fetch all seasons, merging each one as it completes."""
+def fetch_all(start_year: int = 2018, end_year: int = 2025, min_gps: int = 15,
+              reverse: bool = False):
+    """Fetch all seasons, merging each one as it completes.
+
+    Args:
+        min_gps: Minimum number of GPs to consider a season complete.
+                 Seasons with fewer GPs will be re-fetched.
+        reverse: If True, fetch from end_year down to start_year.
+    """
     # Check what we already have
-    existing_years = set()
+    existing_gps: dict[int, int] = {}
     if LAPS_PATH.exists():
         existing = pd.read_parquet(LAPS_PATH)
-        existing_years = set(existing["year"].unique())
-        logger.info("Existing data: %d laps for years %s", len(existing), sorted(existing_years))
+        for y in existing["year"].unique():
+            existing_gps[int(y)] = existing[existing["year"] == y]["gp"].nunique()
+        logger.info("Existing data: %d laps for years %s", len(existing),
+                     {y: f"{g} GPs" for y, g in sorted(existing_gps.items())})
 
-    for year in range(start_year, end_year + 1):
-        if year in existing_years:
-            logger.info("Skipping %d — already fetched", year)
+    years = list(range(start_year, end_year + 1))
+    if reverse:
+        years = years[::-1]
+
+    for i, year in enumerate(years):
+        gps = existing_gps.get(year, 0)
+        if gps >= min_gps:
+            logger.info("Skipping %d — already has %d GPs", year, gps)
             continue
+        if gps > 0:
+            logger.info("Re-fetching %d — only %d GPs (need >= %d)", year, gps, min_gps)
 
         print(f"\n{'='*60}")
         print(f"  Fetching FastF1 data for {year}")
@@ -120,7 +136,7 @@ def fetch_all(start_year: int = 2018, end_year: int = 2025):
             print(f"  {year}: no data available")
 
         # Longer pause between seasons
-        if year < end_year:
+        if i < len(years) - 1:
             print("  Waiting 5s before next season...")
             time.sleep(5)
 

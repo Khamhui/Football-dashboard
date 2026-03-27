@@ -32,6 +32,9 @@ Feature categories:
 23. Constructor upgrade detection (pace jumps mid-season)
 24. Cold start / rookie handling (career races, teammate ELO prior)
 25. Pit stop performance (team pit stop quality from FastF1 stint data)
+26. Circuit physical characteristics (track length, corners, DRS zones, straights)
+27. Rain probability (historical wet race frequency per circuit)
+28. Betting odds (pre-race market implied win probability, when available)
 """
 
 import bisect
@@ -50,6 +53,7 @@ from data.features.regulation import (
     compute_elo_reset_factors,
     REGULATION_CHANGES,
 )
+from data.ingest.weather import build_weather_forecast_index
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,8 @@ _FASTF1_ROLLING_COLS = [
     "sector1_mean", "sector2_mean", "sector3_mean",
     "speedst_avg", "speedst_max", "speedfl_avg",
     "tire_deg_avg", "tire_deg_worst",
+    "tire_deg_soft", "tire_deg_medium", "tire_deg_hard",
+    "avg_stint_deg_rate", "worst_stint_deg_rate",
     "n_stints", "n_compounds",
 ]
 
@@ -82,6 +88,54 @@ _SC_VSC_CODES = _SC_CODES | _VSC_CODES  # Pre-computed union
 _STREET_CIRCUITS = {cid for cid, ct in CIRCUIT_TYPES.items() if ct == "street"}
 _HIGH_SPEED_CIRCUITS = {cid for cid, ct in CIRCUIT_TYPES.items() if ct == "high_speed"}
 _TECHNICAL_CIRCUITS = {cid for cid, ct in CIRCUIT_TYPES.items() if ct == "technical"}
+
+# ── Circuit Physical Characteristics ─────────────────────────────────────
+# Source: FIA circuit data, F1 official docs. Values are for the current/most
+# recent layout used at each circuit. Keys match circuit_id from Jolpica.
+# (length_km, corners, straights_pct, altitude_m, drs_zones)
+CIRCUIT_CHARACTERISTICS: dict[str, dict[str, float]] = {
+    # 2024-2025 calendar
+    "albert_park":     {"length_km": 5.278, "corners": 14, "straights_pct": 0.42, "altitude_m": 5,    "drs_zones": 4},
+    "bahrain":         {"length_km": 5.412, "corners": 15, "straights_pct": 0.40, "altitude_m": 15,   "drs_zones": 3},
+    "jeddah":          {"length_km": 6.174, "corners": 27, "straights_pct": 0.35, "altitude_m": 5,    "drs_zones": 3},
+    "suzuka":          {"length_km": 5.807, "corners": 18, "straights_pct": 0.38, "altitude_m": 50,   "drs_zones": 2},
+    "shanghai":        {"length_km": 5.451, "corners": 16, "straights_pct": 0.45, "altitude_m": 5,    "drs_zones": 3},
+    "miami":           {"length_km": 5.412, "corners": 19, "straights_pct": 0.38, "altitude_m": 2,    "drs_zones": 3},
+    "imola":           {"length_km": 4.909, "corners": 19, "straights_pct": 0.33, "altitude_m": 47,   "drs_zones": 2},
+    "monaco":          {"length_km": 3.337, "corners": 19, "straights_pct": 0.25, "altitude_m": 30,   "drs_zones": 1},
+    "villeneuve":      {"length_km": 4.361, "corners": 14, "straights_pct": 0.48, "altitude_m": 15,   "drs_zones": 3},
+    "catalunya":       {"length_km": 4.657, "corners": 16, "straights_pct": 0.40, "altitude_m": 125,  "drs_zones": 2},
+    "red_bull_ring":   {"length_km": 4.318, "corners": 10, "straights_pct": 0.52, "altitude_m": 700,  "drs_zones": 3},
+    "silverstone":     {"length_km": 5.891, "corners": 18, "straights_pct": 0.42, "altitude_m": 153,  "drs_zones": 2},
+    "hungaroring":     {"length_km": 4.381, "corners": 14, "straights_pct": 0.30, "altitude_m": 264,  "drs_zones": 2},
+    "spa":             {"length_km": 7.004, "corners": 19, "straights_pct": 0.45, "altitude_m": 400,  "drs_zones": 2},
+    "zandvoort":       {"length_km": 4.259, "corners": 14, "straights_pct": 0.32, "altitude_m": 5,    "drs_zones": 2},
+    "monza":           {"length_km": 5.793, "corners": 11, "straights_pct": 0.58, "altitude_m": 162,  "drs_zones": 2},
+    "baku":            {"length_km": 6.003, "corners": 20, "straights_pct": 0.40, "altitude_m": -28,  "drs_zones": 2},
+    "marina_bay":      {"length_km": 4.940, "corners": 19, "straights_pct": 0.30, "altitude_m": 5,    "drs_zones": 3},
+    "americas":        {"length_km": 5.513, "corners": 20, "straights_pct": 0.40, "altitude_m": 230,  "drs_zones": 2},
+    "rodriguez":       {"length_km": 4.304, "corners": 17, "straights_pct": 0.42, "altitude_m": 2285, "drs_zones": 3},
+    "interlagos":      {"length_km": 4.309, "corners": 15, "straights_pct": 0.42, "altitude_m": 750,  "drs_zones": 2},
+    "vegas":           {"length_km": 6.201, "corners": 17, "straights_pct": 0.50, "altitude_m": 620,  "drs_zones": 2},
+    "losail":          {"length_km": 5.419, "corners": 16, "straights_pct": 0.44, "altitude_m": 10,   "drs_zones": 2},
+    "yas_marina":      {"length_km": 5.281, "corners": 16, "straights_pct": 0.42, "altitude_m": 5,    "drs_zones": 2},
+    # Historic circuits (2003+)
+    "sepang":          {"length_km": 5.543, "corners": 15, "straights_pct": 0.40, "altitude_m": 40,   "drs_zones": 2},
+    "hockenheimring":  {"length_km": 4.574, "corners": 17, "straights_pct": 0.45, "altitude_m": 103,  "drs_zones": 2},
+    "nurburgring":     {"length_km": 5.148, "corners": 15, "straights_pct": 0.42, "altitude_m": 620,  "drs_zones": 2},
+    "istanbul":        {"length_km": 5.338, "corners": 14, "straights_pct": 0.42, "altitude_m": 155,  "drs_zones": 2},
+    "indianapolis":    {"length_km": 4.192, "corners": 13, "straights_pct": 0.48, "altitude_m": 218,  "drs_zones": 1},
+    "magny_cours":     {"length_km": 4.411, "corners": 17, "straights_pct": 0.38, "altitude_m": 250,  "drs_zones": 1},
+    "fuji":            {"length_km": 4.563, "corners": 16, "straights_pct": 0.44, "altitude_m": 580,  "drs_zones": 1},
+    "valencia":        {"length_km": 5.419, "corners": 25, "straights_pct": 0.35, "altitude_m": 5,    "drs_zones": 2},
+    "yeongam":         {"length_km": 5.615, "corners": 18, "straights_pct": 0.40, "altitude_m": 10,   "drs_zones": 2},
+    "buddh":           {"length_km": 5.125, "corners": 16, "straights_pct": 0.42, "altitude_m": 225,  "drs_zones": 3},
+    "sochi":           {"length_km": 5.848, "corners": 18, "straights_pct": 0.42, "altitude_m": 5,    "drs_zones": 2},
+    "ricard":          {"length_km": 5.842, "corners": 15, "straights_pct": 0.50, "altitude_m": 432,  "drs_zones": 2},
+    "portimao":        {"length_km": 4.653, "corners": 15, "straights_pct": 0.40, "altitude_m": 112,  "drs_zones": 2},
+    "mugello":         {"length_km": 5.245, "corners": 15, "straights_pct": 0.40, "altitude_m": 292,  "drs_zones": 2},
+    "sakhir":          {"length_km": 3.543, "corners": 11, "straights_pct": 0.50, "altitude_m": 15,   "drs_zones": 3},
+}
 
 
 def _linear_trend(values: np.ndarray) -> float:
@@ -249,16 +303,36 @@ def _compute_fastf1_race_stats(
                         row[f"{speed_col.lower()}_avg"] = vals.mean()
                         row[f"{speed_col.lower()}_max"] = vals.max()
 
-            # Tire degradation: lap time trend per stint
+            # Tire degradation: lap time trend per stint + per-compound breakdown
+            # Single pass over stints computes both aggregate and compound-level rates
             if "Stint" in accurate.columns and "LapTime_s" in accurate.columns:
+                has_compound = "Compound" in accurate.columns
+                compound_map = {"SOFT": "soft", "MEDIUM": "medium", "HARD": "hard"}
                 deg_slopes = []
+
                 for _, stint_laps in accurate.groupby("Stint"):
                     times = stint_laps["LapTime_s"].dropna().values
-                    if len(times) >= 5:
-                        deg_slopes.append(_linear_trend(times))
+                    if len(times) < 5:
+                        continue
+                    deg = _linear_trend(times)
+                    deg_slopes.append(deg)
+
+                    # Per-compound degradation (keep worst per compound)
+                    if has_compound:
+                        compound = stint_laps["Compound"].mode()
+                        if not compound.empty:
+                            compound_name = compound_map.get(str(compound.iloc[0]).upper())
+                            if compound_name is not None:
+                                key = f"tire_deg_{compound_name}"
+                                if key not in row or deg > row[key]:
+                                    row[key] = deg
+
                 if deg_slopes:
                     row["tire_deg_avg"] = np.mean(deg_slopes)
                     row["tire_deg_worst"] = max(deg_slopes)
+                    # Aliases kept for backwards compatibility with saved feature matrices
+                    row["avg_stint_deg_rate"] = row["tire_deg_avg"]
+                    row["worst_stint_deg_rate"] = row["tire_deg_worst"]
 
             # Strategy indicators
             if "Stint" in accurate.columns:
@@ -784,6 +858,76 @@ def _compute_pit_stop_stats(
     return stats
 
 
+def _compute_circuit_rain_probability(
+    fastf1_laps: Optional[pd.DataFrame],
+    wet_races: set[tuple[int, int]],
+    race_results: pd.DataFrame,
+) -> dict[str, float]:
+    """Compute historical rain probability per circuit.
+
+    Combines FastF1 rainfall data (2018+) with manually-flagged wet races
+    to estimate the likelihood of rain at each circuit.
+    Returns dict: circuit_id -> rain_probability (0.0 to 1.0).
+    """
+    # Build (season, round) -> circuit_id mapping
+    race_circuits: dict[tuple[int, int], str] = {}
+    for _, row in race_results[["season", "round", "circuit_id"]].drop_duplicates().iterrows():
+        race_circuits[(int(row["season"]), int(row["round"]))] = row["circuit_id"]
+
+    # Count wet/total per circuit
+    circuit_wet: dict[str, int] = {}
+    circuit_total: dict[str, int] = {}
+    for (season, rnd), cid in race_circuits.items():
+        circuit_total[cid] = circuit_total.get(cid, 0) + 1
+        if (season, rnd) in wet_races:
+            circuit_wet[cid] = circuit_wet.get(cid, 0) + 1
+
+    result = {}
+    for cid, total in circuit_total.items():
+        wet_count = circuit_wet.get(cid, 0)
+        result[cid] = wet_count / total if total > 0 else 0.0
+
+    n_with_rain = sum(1 for v in result.values() if v > 0)
+    logger.info(f"Computed rain probability for {len(result)} circuits ({n_with_rain} with historical rain)")
+    return result
+
+
+def _build_odds_index(
+    data_dir: Path,
+) -> dict[tuple[int, int, str], float]:
+    """Load cached odds parquet files and build a feature index.
+
+    Returns dict: (season, round, driver_id) -> market_win_pct (fair probability).
+    """
+    odds_files = sorted(data_dir.glob("odds_*_R*.parquet"))
+    if not odds_files:
+        return {}
+
+    index: dict[tuple[int, int, str], float] = {}
+    for path in odds_files:
+        try:
+            # Filename format: odds_2026_R03.parquet
+            parts = path.stem.split("_")
+            season = int(parts[1])
+            rnd = int(parts[2][1:])  # Strip leading 'R'
+            df = pd.read_parquet(path)
+            if df.empty:
+                continue
+
+            # Compute consensus (avg across bookmakers) if multiple
+            if "fair_prob" in df.columns and "driver_id" in df.columns:
+                consensus = df.groupby("driver_id")["fair_prob"].mean()
+                for driver_id, prob in consensus.items():
+                    index[(season, rnd, driver_id)] = prob
+        except Exception as e:
+            logger.warning("Failed to load odds file %s: %s", path.name, e)
+
+    if index:
+        n_races = len({(s, r) for s, r, _ in index})
+        logger.info(f"Loaded odds for {n_races} races ({len(index)} driver entries)")
+    return index
+
+
 def build_feature_matrix(
     race_results: pd.DataFrame,
     qualifying: pd.DataFrame,
@@ -850,6 +994,17 @@ def build_feature_matrix(
     # Pre-compute pit stop stats from FastF1 stint data
     pit_stop_stats = _compute_pit_stop_stats(fastf1_laps, driver_code_map)
     has_pit_stops = bool(pit_stop_stats)
+
+    # Pre-compute circuit rain probability (historical wet race frequency)
+    circuit_rain_prob = _compute_circuit_rain_probability(fastf1_laps, wet_races, race_results)
+
+    # Pre-load betting odds index (from cached parquet files)
+    odds_index = _build_odds_index(DATA_DIR)
+    has_odds = bool(odds_index)
+
+    # Pre-load weather forecast index (from cached Open-Meteo parquet files)
+    forecast_index = build_weather_forecast_index(DATA_DIR)
+    has_forecasts = bool(forecast_index)
 
     # Sort chronologically
     race_results = race_results.sort_values(["season", "round", "position"]).copy()
@@ -920,6 +1075,8 @@ def build_feature_matrix(
     # Driver history accumulators (position-based + FastF1-based + sprint + track status)
     driver_history: dict[str, list[dict]] = {}
     driver_fastf1_history: dict[str, list[dict]] = {}
+    # race_key -> list of tire_deg_avg values for all drivers (O(1) field lookup)
+    race_key_tire_degs: dict[tuple, list[float]] = {}
     driver_sprint_history: dict[str, list[dict]] = {}
     driver_track_status_history: dict[str, list[dict]] = {}
     # Constructor-level accumulator: (constructor_id, season) -> list of positions
@@ -1079,11 +1236,42 @@ def build_feature_matrix(
                     features["sprint_grid_delta"] = sprint_data["sprint_grid"] - sprint_data["sprint_position"]
                 features["sprint_dnf"] = sprint_data["sprint_dnf"]
 
-            # ── Weather Conditions (from FastF1) ──
+            # ── Weather Conditions (from FastF1, actual race-day measurements) ──
             race_weather = weather_index.get((season, rnd))
             if race_weather:
                 for wk, wv in race_weather.items():
                     features[wk] = wv
+
+            # ── Weather Forecast (pre-race predictions from Open-Meteo, 2021+) ──
+            if has_forecasts:
+                race_forecast = forecast_index.get((season, rnd))
+                if race_forecast:
+                    features["forecast_temp"] = race_forecast.get("forecast_temp")
+                    # Normalize rain probability to 0-1 scale (API returns 0-100)
+                    rain_pct = race_forecast.get("forecast_rain_prob")
+                    if rain_pct is not None:
+                        features["forecast_rain_prob"] = rain_pct / 100.0
+                    features["forecast_wind"] = race_forecast.get("forecast_wind_speed")
+
+            # ── Circuit Physical Characteristics ──
+            circ_chars = CIRCUIT_CHARACTERISTICS.get(circuit_id)
+            if circ_chars:
+                features["circuit_length_km"] = circ_chars["length_km"]
+                features["circuit_corners"] = circ_chars["corners"]
+                features["circuit_straights_pct"] = circ_chars["straights_pct"]
+                features["circuit_altitude_m"] = circ_chars["altitude_m"]
+                features["circuit_drs_zones"] = circ_chars["drs_zones"]
+
+            # ── Rain Probability (historical wet race frequency at this circuit) ──
+            rain_prob = circuit_rain_prob.get(circuit_id)
+            if rain_prob is not None:
+                features["circuit_rain_probability"] = rain_prob
+
+            # ── Betting Odds (pre-race market implied probability) ──
+            if has_odds:
+                odds_prob = odds_index.get((season, rnd, driver_id))
+                if odds_prob is not None:
+                    features["market_win_pct"] = odds_prob
 
             # ── Championship Standings (PREVIOUS round — no leakage) ──
             if has_standings:
@@ -1217,6 +1405,17 @@ def build_feature_matrix(
                     deg_vals = [h["tire_deg_avg"] for h in f1_hist[-5:] if "tire_deg_avg" in h]
                     if len(deg_vals) >= 3:
                         features["f1_tire_management_trend"] = _linear_trend(np.array(deg_vals))
+
+                    # Tire management vs field: how driver's degradation compares
+                    # to other drivers at the same race (negative = better management)
+                    if f1_hist:
+                        latest = f1_hist[-1]
+                        latest_key = latest.get("_race_key")
+                        if latest_key and "tire_deg_avg" in latest:
+                            field_degs = race_key_tire_degs.get(latest_key, [])
+                            if len(field_degs) >= 5:
+                                field_median = np.median(field_degs)
+                                features["f1_tire_management_vs_field"] = latest["tire_deg_avg"] - field_median
 
                     # Speed consistency
                     cons_vals = [h["lap_consistency"] for h in f1_hist[-5:] if "lap_consistency" in h]
@@ -1489,9 +1688,12 @@ def build_feature_matrix(
             # Update FastF1 history (after feature extraction — no leakage)
             f1_key = (season, rnd, driver_id)
             if f1_key in fastf1_stats:
-                driver_fastf1_history.setdefault(driver_id, []).append(
-                    fastf1_stats[f1_key]
-                )
+                entry = fastf1_stats[f1_key]
+                entry["_race_key"] = (season, rnd)
+                driver_fastf1_history.setdefault(driver_id, []).append(entry)
+                # Maintain per-race tire deg index for O(1) field comparison
+                if "tire_deg_avg" in entry:
+                    race_key_tire_degs.setdefault((season, rnd), []).append(entry["tire_deg_avg"])
 
             # Update track status history
             if f1_key in track_status_stats:

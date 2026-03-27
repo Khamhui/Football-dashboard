@@ -153,16 +153,22 @@ class F1Predictor:
         stacking_cv = KFold(n_splits=n_splits, shuffle=False)
 
         def _calibrate(base, y_binary):
-            """Wrap classifier in CalibratedClassifierCV if enough samples per class."""
+            """Wrap classifier in VennAbersCalibrator (with CalibratedClassifierCV fallback)."""
             min_class = min(y_binary.sum(), len(y_binary) - y_binary.sum())
             if min_class < 3:
                 logger.warning(
                     "Too few samples for calibration (min class=%d), using uncalibrated model", min_class
                 )
                 return base
-            splits = max(2, min(3, int(min_class)))
-            cv = TimeSeriesSplit(n_splits=splits)
-            return CalibratedClassifierCV(base, cv=cv, method="isotonic")
+            try:
+                from data.models.venn_abers import VennAbersCalibrator
+                logger.info("Using Venn-ABERS calibration (theoretically guaranteed)")
+                return VennAbersCalibrator(base, cal_fraction=0.3)
+            except Exception as e:
+                logger.warning("Venn-ABERS failed (%s), falling back to isotonic CV", e)
+                splits = max(2, min(3, int(min_class)))
+                cv = TimeSeriesSplit(n_splits=splits)
+                return CalibratedClassifierCV(base, cv=cv, method="isotonic")
 
         # Load Optuna-tuned params if available
         tuned = None
@@ -324,11 +330,26 @@ class F1Predictor:
         features = self._align_features(X)
 
         results["predicted_position"] = self.position_model.predict(features)
-        results["prob_podium"] = self.podium_model.predict_proba(features)[:, 1]
-        results["prob_winner"] = self.winner_model.predict_proba(features)[:, 1]
-        results["prob_points"] = self.points_model.predict_proba(features)[:, 1]
-        if self.dnf_model is not None:
-            results["prob_dnf"] = self.dnf_model.predict_proba(features)[:, 1]
+
+        # For Venn-ABERS models, extract both probabilities and intervals from
+        # a single _raw_intervals call to avoid redundant base model inference
+        for name, model in [("winner", self.winner_model), ("podium", self.podium_model),
+                            ("points", self.points_model), ("dnf", self.dnf_model)]:
+            if model is None:
+                continue
+            if hasattr(model, "_raw_intervals"):
+                try:
+                    p0, p1 = model._raw_intervals(features)
+                    denom = np.where((1.0 - p0) + p1 == 0, 1e-10, (1.0 - p0) + p1)
+                    results[f"prob_{name}"] = np.clip(p1 / denom, 0.0, 1.0)
+                    results[f"prob_{name}_lo"] = np.clip(np.minimum(p0, p1), 0.0, 1.0)
+                    results[f"prob_{name}_hi"] = np.clip(np.maximum(p0, p1), 0.0, 1.0)
+                except Exception as e:
+                    logger.warning("Venn-ABERS inference failed for %s: %s", name, e)
+                    results[f"prob_{name}"] = model.predict_proba(features)[:, 1]
+            else:
+                results[f"prob_{name}"] = model.predict_proba(features)[:, 1]
+
         results["predicted_rank"] = results["predicted_position"].rank().astype(int)
 
         return results.sort_values("predicted_position")
@@ -415,6 +436,63 @@ class F1Predictor:
         logger.info(f"Models loaded from {path}")
 
 
+def _fit_pl_model(feature_matrix: pd.DataFrame):
+    """
+    Fit a Plackett-Luce model on the training split.
+
+    Returns the fitted model, or None if fitting fails or data is insufficient.
+    """
+    try:
+        from data.models.plackett_luce import PlackettLuceModel
+
+        required = {"season", "round", "driver_id", "constructor_id", "position"}
+        if not required.issubset(feature_matrix.columns):
+            logger.warning("Missing columns for PL features, skipping")
+            return None
+
+        race_data = feature_matrix[["season", "round", "driver_id", "constructor_id", "position"]].dropna()
+        if len(race_data) < 100:
+            logger.warning("Too few races for PL (%d), skipping", len(race_data))
+            return None
+
+        pl = PlackettLuceModel()
+        pl.fit(race_data)
+        return pl
+
+    except Exception as e:
+        logger.warning("PL model fitting failed: %s", e)
+        return None
+
+
+def _inject_pl_features(feature_matrix: pd.DataFrame, X: pd.DataFrame, pl_model=None) -> pd.DataFrame:
+    """
+    Inject Plackett-Luce features into the feature matrix for ensemble stacking.
+
+    Uses a pre-fitted PL model to add:
+    pl_driver_strength, pl_constructor_strength, pl_combined_strength
+    """
+    if pl_model is None:
+        return X
+
+    try:
+        # Vectorized PL feature lookup via pandas map
+        shared_idx = X.index.intersection(feature_matrix.index)
+        drivers = feature_matrix.loc[shared_idx, "driver_id"].astype(str)
+        constructors = feature_matrix.loc[shared_idx, "constructor_id"].astype(str)
+
+        X = X.copy()
+        X["pl_driver_strength"] = drivers.map(pl_model.driver_strengths).fillna(0.0).reindex(X.index, fill_value=0.0)
+        X["pl_constructor_strength"] = constructors.map(pl_model.constructor_strengths).fillna(0.0).reindex(X.index, fill_value=0.0)
+        X["pl_combined_strength"] = X["pl_driver_strength"] + X["pl_constructor_strength"]
+
+        logger.info("Injected 3 Plackett-Luce features into feature matrix")
+        return X
+
+    except Exception as e:
+        logger.warning("PL feature injection failed: %s", e)
+        return X
+
+
 def train_and_evaluate(
     feature_matrix: pd.DataFrame,
     test_seasons: list[int] = None,
@@ -445,6 +523,11 @@ def train_and_evaluate(
     X_test, y_test = prepare_training_data(
         feature_matrix[test_mask], target="position"
     )
+
+    # Inject Plackett-Luce features (trained on training data only, fit once)
+    pl_model = _fit_pl_model(feature_matrix[train_mask])
+    X_train = _inject_pl_features(feature_matrix[train_mask], X_train, pl_model)
+    X_test = _inject_pl_features(feature_matrix[train_mask], X_test, pl_model)
 
     # Align columns
     for col in set(X_train.columns) - set(X_test.columns):

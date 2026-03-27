@@ -95,23 +95,36 @@ class OpenF1Client:
 
     # ── Telemetry ────────────────────────────────────────────────────
 
-    def get_car_data(self, session_key: int, driver_number: int) -> pd.DataFrame:
+    def get_car_data(
+        self,
+        session_key: int,
+        driver_number: int,
+        date_gt: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
         Raw car telemetry at ~3.7Hz.
         Fields: speed, rpm, n_gear, throttle, brake, drs.
-        WARNING: Returns large datasets. Use for specific analyses.
-        """
-        return self._get_df("car_data", {
-            "session_key": session_key,
-            "driver_number": driver_number,
-        })
 
-    def get_location(self, session_key: int, driver_number: int) -> pd.DataFrame:
-        """Car position on track (x, y, z coordinates)."""
-        return self._get_df("location", {
+        date_gt: ISO-8601 timestamp — only return rows with date > this value.
+        """
+        params: dict[str, Any] = {
             "session_key": session_key,
             "driver_number": driver_number,
-        })
+        }
+        if date_gt is not None:
+            params["date>"] = date_gt
+        return self._get_df("car_data", params)
+
+    def get_location(self, session_key: int, driver_number: Optional[int] = None) -> pd.DataFrame:
+        """Car position on track (x, y, z coordinates).
+
+        If driver_number is omitted, returns locations for all drivers in
+        a single API call.
+        """
+        params: dict[str, Any] = {"session_key": session_key}
+        if driver_number is not None:
+            params["driver_number"] = driver_number
+        return self._get_df("location", params)
 
     # ── Conditions ───────────────────────────────────────────────────
 

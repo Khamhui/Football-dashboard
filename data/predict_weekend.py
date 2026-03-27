@@ -12,6 +12,9 @@ Usage:
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import logging
 from pathlib import Path
 from typing import Optional
@@ -377,6 +380,41 @@ def format_prediction_table(results: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def _auto_fetch_odds(season: int, race_round: int):
+    """Auto-fetch current betting odds if ODDS_API_KEY is set.
+
+    Fetches via OddsClient, saves to cache so the feature matrix picks them up
+    as ``market_win_pct``.  Skips silently when no API key is configured.
+    """
+    import os
+
+    if not os.environ.get("ODDS_API_KEY"):
+        logger.info("ODDS_API_KEY not set — skipping odds auto-fetch")
+        return
+
+    try:
+        from data.ingest.odds import OddsClient
+
+        client = OddsClient()
+        # Check cache first
+        cached = client.load_odds(season, race_round)
+        if cached is not None and not cached.empty:
+            logger.info("Odds already cached for %d R%02d (%d rows)", season, race_round, len(cached))
+            return
+
+        print("  Fetching betting odds from The Odds API...")
+        odds = client.fetch_current_odds()
+        if odds is not None and not odds.empty:
+            client.save_odds(odds, season, race_round)
+            consensus = client.consensus_odds(odds)
+            n_drivers = len(consensus)
+            print(f"  Odds saved: {n_drivers} drivers from {odds['bookmaker'].nunique()} bookmakers")
+        else:
+            logger.info("No odds returned from API (no upcoming race market?)")
+    except Exception as e:
+        logger.warning("Odds auto-fetch failed (non-fatal): %s", e)
+
+
 def run_weekend_prediction(
     season: int,
     race_round: int,
@@ -422,6 +460,9 @@ def run_weekend_prediction(
         # Step 2: Update FastF1 laps
         print("\nStep 2: Updating FastF1 laps database...")
         update_fastf1_laps(weekend_laps)
+
+    # Step 2b: Auto-fetch betting odds if API key is available
+    _auto_fetch_odds(season, race_round)
 
     # Step 3: Inject placeholder rows + rebuild feature matrix
     if rebuild_features:
@@ -478,6 +519,7 @@ def run_weekend_prediction(
     save_cols = [
         "driver_id", "predicted_position", "predicted_rank",
         "prob_podium", "prob_winner", "prob_points", "prob_dnf",
+        "prob_winner_lo", "prob_winner_hi", "prob_podium_lo", "prob_podium_hi",
         "sim_win_pct", "sim_podium_pct", "sim_points_pct", "sim_dnf_pct",
         "sim_expected_points", "sim_points_std",
         "sim_median_position", "sim_position_25", "sim_position_75",

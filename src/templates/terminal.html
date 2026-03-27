@@ -66,6 +66,7 @@
     <span class="topbar-meta dim">&middot;</span>
     {% endif %}
     <button class="theme-btn" onclick="runPredict('predict')" id="btn-predict" title="Run prediction for this round">▶ Predict</button>
+    <button class="theme-btn" onclick="runPredict('prerace')" id="btn-prerace" title="Full pre-race: weather + odds + polymarket + predict">▶ Pre-Race</button>
     <button class="theme-btn" onclick="runPredict('full')" id="btn-full" title="Full pipeline: ingest + retrain + predict">▶ Full Update</button>
     <span id="predict-status"></span>
     <span class="topbar-meta">{{ now }}</span>
@@ -76,8 +77,50 @@
 <!-- ===== 6-column grid ===== -->
 <div class="grid">
 
-  <!-- ═══════ COL 1: PREDICTION ═══════ -->
+  <!-- ═══════ COL 1: NEWS (280px) ═══════ -->
   <div class="panel">
+    <div class="section">
+      <div class="section-title">News Feed <span class="tag">RSS</span></div>
+      <div id="news-feed">
+        <p class="dim">Loading...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ COL 2: PREDICTION (720px) ═══════ -->
+  <div class="panel" id="prediction-panel">
+
+    {# === Live Probability Overlay — hidden until SSE activates it === #}
+    <div id="live-prob-container" style="display:none" class="live-mode">
+      <div class="section">
+        <div class="section-title">
+          <span class="live-indicator">LIVE</span>
+          <span class="live-lap-info" id="live-lap-info">Lap 0/0</span>
+          <span id="live-track-badge"></span>
+          <span class="tag">1k Monte Carlo sims / lap</span>
+        </div>
+        <div class="event-flash-container" id="event-flash-container"></div>
+        <table class="live-prob-table" style="margin-top:4px">
+          <thead>
+            <tr>
+              <th class="c" style="width:24px">#</th>
+              <th>Driver</th>
+              <th class="c">Pos</th>
+              <th class="r">Gap</th>
+              <th class="c">Tyre</th>
+              <th class="r">Win%</th>
+              <th class="r">Pod%</th>
+              <th class="r">Trend</th>
+              <th class="c" style="width:54px">Win History</th>
+            </tr>
+          </thead>
+          <tbody id="live-prob-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    {# === Static prediction (hidden during live mode) === #}
+    <div id="static-pred-container">
     {% if pred is not none %}
     <div class="section">
       <div class="section-title">Race Prediction <span class="tag">10k Monte Carlo sims</span></div>
@@ -115,6 +158,11 @@
             <th class="r">E[Pts]</th>
             <th class="r">Med</th>
             <th class="c">Range</th>
+            {% if pred.columns.isin(['best_odds']).any() %}
+            <th class="r">Odds</th>
+            <th class="r">Mkt%</th>
+            <th class="r">Edge</th>
+            {% endif %}
           </tr>
         </thead>
         <tbody>
@@ -130,6 +178,16 @@
             <td class="r">
               <span class="bar" style="width:{{ row.sim_win_pct * 0.8 }}px"></span>
               <span class="{{ 'bright gain' if row.sim_win_pct >= 10 else ('gain' if row.sim_win_pct >= 1 else 'dim') }}">{{ "%.1f"|format(row.sim_win_pct) }}</span>
+              {% if pred.columns.isin(['prob_winner_lo']).any() %}
+              {% set lo = row.get('prob_winner_lo', None) %}
+              {% set hi = row.get('prob_winner_hi', None) %}
+              {% if lo is not none and lo == lo and hi is not none and hi == hi %}
+              {% set lo_pct = lo * 100 %}
+              {% set hi_pct = hi * 100 %}
+              {% set spread = hi_pct - lo_pct %}
+              <span class="dim" style="font-size:9px"> ({{ "%.0f"|format(lo_pct) }}-{{ "%.0f"|format(hi_pct) }})</span>{% if spread > 15 %}<span class="dim" style="font-size:9px" title="Wide confidence interval">?</span>{% endif %}
+              {% endif %}
+              {% endif %}
             </td>
             <td class="r">{{ "%.1f"|format(row.sim_podium_pct) }}</td>
             <td class="r dim">{{ "%.1f"|format(row.sim_points_pct) }}</td>
@@ -137,6 +195,20 @@
             <td class="r bright">{{ "%.1f"|format(row.sim_expected_points) }}</td>
             <td class="r">{{ row.sim_median_position|int }}</td>
             <td class="c dim">{{ row.sim_position_25|int }}-{{ row.sim_position_75|int }}</td>
+            {% if pred.columns.isin(['best_odds']).any() %}
+            {% set odds_val = row.get('best_odds', None) %}
+            {% set mkt = row.get('market_win_pct', None) %}
+            {% if odds_val is not none and odds_val == odds_val %}
+            <td class="r">{{ "%.1f"|format(odds_val) }}</td>
+            <td class="r dim">{{ "%.1f"|format(mkt) }}%</td>
+            {% set edge = row.sim_win_pct - mkt %}
+            <td class="r {{ 'gain' if edge > 2 else ('drop' if edge < -2 else 'dim') }}">{{ "%+.1f"|format(edge) }}</td>
+            {% else %}
+            <td class="r dim">-</td>
+            <td class="r dim">-</td>
+            <td class="r dim">-</td>
+            {% endif %}
+            {% endif %}
           </tr>
           {% endfor %}
         </tbody>
@@ -162,12 +234,19 @@
       </ul>
     </div>
 
-    {# Charts #}
+    {% else %}
+    <div class="section">
+      <div class="section-title">No Prediction</div>
+      <p class="dim">Run: python -m data.predict_weekend</p>
+    </div>
+    {% endif %}
+
+    {# Charts — below predictions, vertical scroll within this column #}
+    {% if pred is not none %}
     {{ bar_chart("Win Probability", pred, "sim_win_pct", "accent-bar", threshold=0.5) }}
     {{ bar_chart("Expected Points", pred, "sim_expected_points", "yellow-bar", suffix="", n=10) }}
     {{ bar_chart("Podium Probability", pred, "sim_podium_pct", "cyan-bar", threshold=5) }}
 
-    {# DNF Risk #}
     {% if dnf_sorted is not none %}
     <div class="section">
       <div class="section-title">DNF Risk</div>
@@ -187,16 +266,251 @@
       </div>
     </div>
     {% endif %}
+    {% endif %}
 
-    {% else %}
+    {# Polymarket Edge — only shown when snapshot data is cached #}
+    {% if polymarket is not none and polymarket|length > 0 %}
     <div class="section">
-      <div class="section-title">No Prediction</div>
-      <p class="dim">Run: python -m data.predict_weekend</p>
+      <div class="section-title">Polymarket Edge <span class="tag">prediction market</span></div>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Driver</th>
+            <th class="r">Model%</th>
+            <th class="r">Mkt%</th>
+            <th class="r">Edge</th>
+            <th class="r">Kelly%</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in polymarket.iterrows() %}
+          <tr class="{{ 'value-pos' if row.edge > 0 else ('value-neg' if row.edge < -1 else '') }}">
+            <td>{{ driver_name(row.driver_id) }}</td>
+            <td class="r">{{ "%.1f"|format(row.model_pct) }}</td>
+            <td class="r">{{ "%.1f"|format(row.market_pct) }}</td>
+            <td class="r {{ 'gain' if row.edge > 0 else ('drop' if row.edge < 0 else 'dim') }}">{{ "%+.1f"|format(row.edge) }}</td>
+            <td class="r {% if row.kelly_stake > 0 %}accent{% else %}dim{% endif %}">{{ "%.1f"|format(row.kelly_stake) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
     {% endif %}
+
+    </div>{# close static-pred-container #}
   </div>
 
-  <!-- ═══════ COL 2: RACE CONTEXT ═══════ -->
+  <!-- ═══════ COL 2: RACE POSITIONS (340px) ═══════ -->
+  <div class="panel">
+
+    {# Race Result #}
+    <div class="section">
+      <div class="section-title">Race Result <span class="tag">{{ event_name }}</span></div>
+      {% if race|length > 0 %}
+      <table>
+        <thead>
+          <tr>
+            <th class="c" style="width:24px">P</th>
+            <th>Driver</th>
+            <th>Team</th>
+            <th class="c">GRD</th>
+            <th class="c">+/-</th>
+            <th class="r">Pts</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in race.iterrows() %}
+          {% set p = row.position %}
+          {% set g = row.grid if row.grid|notnan else 0 %}
+          {% set delta = (g|int - p|int) if p|notnan and g|notnan else 0 %}
+          <tr>
+            <td class="c {{ p|pos_class }}">{{ p|int if p|notnan else '-' }}</td>
+            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span><span class="{{ 'bright' if p|notnan and p <= 3 }}">{{ driver_name(row.driver_id) }}</span></td>
+            <td class="dim">{{ team_name(row.constructor_id) }}</td>
+            <td class="c dim">{{ g|int if g else '-' }}</td>
+            <td class="c {{ delta|delta_class }}">{% if delta > 0 %}+{{ delta }}{% elif delta < 0 %}{{ delta }}{% else %}-{% endif %}</td>
+            <td class="r">{{ row.points|int if row.points|notnan else 0 }}</td>
+            <td class="{{ 'dnf-high' if row.status != 'Finished' and '+' not in (row.status or '') else 'dim' }}">{{ row.status|na }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="dim">Race not completed yet</p>
+      {% endif %}
+    </div>
+
+    {# Qualifying #}
+    <div class="section">
+      <div class="section-title">Qualifying <span class="tag">{{ season }} R{{ race_round }}</span></div>
+      {% if quali|length > 0 %}
+      <table>
+        <thead>
+          <tr>
+            <th class="c" style="width:24px">P</th>
+            <th>Driver</th>
+            <th class="r">Q1</th>
+            <th class="r">Q2</th>
+            <th class="r">Q3</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in quali.iterrows() %}
+          {% set p = row.position %}
+          <tr>
+            <td class="c {{ p|pos_class }}">{{ p|int if p|notnan else '-' }}</td>
+            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span>{{ driver_name(row.driver_id) }}</td>
+            <td class="r dim">{{ row.q1|na }}</td>
+            <td class="r dim">{{ row.q2|na }}</td>
+            <td class="r">{{ row.q3|na }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="dim">No qualifying data</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ═══════ COL 3: CIRCUIT MAP (500px) ═══════ -->
+  <div class="panel">
+
+    {# Circuit Map — shared canvas for live + replay modes #}
+    <div class="section" id="track-map-section">
+      <div class="section-title">
+        Circuit Map <span class="tag" id="track-map-tag">offline</span>
+        <span style="flex:1"></span>
+        <button class="theme-btn" id="track-mode-toggle" onclick="toggleTrackMode()" style="font-size:10px;padding:1px 6px">Replay</button>
+      </div>
+      <div class="track-map-wrap" style="height:400px">
+        <canvas id="track-map" width="960" height="800"></canvas>
+        <span class="track-map-status" id="track-map-status">offline</span>
+      </div>
+
+      {# Replay controls — hidden by default, shown when in replay mode #}
+      <div id="replay-controls" class="replay-controls" style="display:none">
+        <div class="replay-session-row">
+          <select id="replay-session-select" onchange="onReplaySessionChange(this.value)">
+            <option value="">Select a race...</option>
+          </select>
+          <span id="replay-load-status" class="replay-load-status"></span>
+        </div>
+        <div id="replay-progress-bar" class="replay-progress-bar" style="display:none">
+          <div class="replay-progress-fill" id="replay-progress-fill"></div>
+          <span class="replay-progress-text" id="replay-progress-text">Loading...</span>
+        </div>
+        <div id="replay-player" class="replay-player" style="display:none">
+          <div class="replay-time-row">
+            <button class="replay-btn" id="replay-play-btn" onclick="toggleReplayPlay()">&#9654;</button>
+            <span class="replay-elapsed" id="replay-elapsed">0:00:00</span>
+            <input type="range" class="replay-scrubber" id="replay-scrubber" min="0" max="1000" value="0" oninput="onReplayScrub(this.value)">
+            <span class="replay-lap" id="replay-lap">Lap 0/0</span>
+          </div>
+          <div class="replay-speed-row">
+            <span class="replay-speed-label">Speed:</span>
+            <button class="replay-speed-btn active" data-speed="1" onclick="setReplaySpeed(1)">1x</button>
+            <button class="replay-speed-btn" data-speed="2" onclick="setReplaySpeed(2)">2x</button>
+            <button class="replay-speed-btn" data-speed="5" onclick="setReplaySpeed(5)">5x</button>
+            <button class="replay-speed-btn" data-speed="10" onclick="setReplaySpeed(10)">10x</button>
+            <button class="replay-speed-btn" data-speed="30" onclick="setReplaySpeed(30)">30x</button>
+            <span style="flex:1"></span>
+            <span class="replay-track-status" id="replay-track-status"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {# Strategy context below the map #}
+    {% if pred is not none %}
+    <div class="section">
+      <div class="section-title">Race Strategy</div>
+      <table>
+        <thead>
+          <tr><th>Driver</th><th class="r">Pred Pos</th><th class="r">Win%</th><th class="r">DNF%</th><th class="r">Pts Range</th></tr>
+        </thead>
+        <tbody>
+          {% for i, row in pred.head(10).iterrows() %}
+          <tr>
+            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span> {{ driver_name(row.driver_id) }}</td>
+            <td class="r">{{ "%.1f"|format(row.predicted_position) }}</td>
+            <td class="r accent">{{ "%.0f"|format(row.sim_win_pct) }}%</td>
+            <td class="r {{ 'dnf-high' if row.sim_dnf_pct >= 20 else 'dim' }}">{{ "%.0f"|format(row.sim_dnf_pct) }}%</td>
+            <td class="r dim">P{{ row.sim_position_25|int }}–P{{ row.sim_position_75|int }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {# Circuit characteristics — uses fields from _build_race_context().circuit_stats #}
+    {% set cs = race_context.circuit_stats if race_context is defined and race_context.circuit_stats is defined else none %}
+    {% if cs is not none and ('front_row_win_rate' in cs or 'attrition_rate' in cs or 'overtaking_rate' in cs) %}
+    <div class="section">
+      <div class="section-title">Circuit DNA</div>
+      <div class="stats">
+        {% if 'front_row_win_rate' in cs %}
+        <div class="stat"><span class="label">Front Row → Win</span><span class="value">{{ "%.0f"|format(cs.front_row_win_rate * 100) }}%</span></div>
+        {% endif %}
+        {% if 'attrition_rate' in cs %}
+        <div class="stat"><span class="label">Attrition</span><span class="value">{{ "%.0f"|format(cs.attrition_rate * 100) }}%</span></div>
+        {% endif %}
+        {% if 'overtaking_rate' in cs %}
+        <div class="stat"><span class="label">Overtaking</span><span class="value">{{ "%.1f"|format(cs.overtaking_rate) }}</span></div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {# What-If Scenario Simulator #}
+    <div class="section" id="whatif-section">
+      <div class="section-title">What If?</div>
+
+      <div class="whatif-presets">
+        <button class="whatif-btn" data-scenario='{"type":"safety_car"}'>Safety Car</button>
+        <button class="whatif-btn" data-scenario='{"type":"vsc"}'>VSC</button>
+        <button class="whatif-btn" data-scenario='{"type":"red_flag"}'>Red Flag</button>
+        <button class="whatif-btn" data-scenario='{"type":"rain","in_laps":5}'>Rain</button>
+      </div>
+
+      <div class="whatif-driver-action">
+        <select id="whatif-driver">
+          <option value="">Driver</option>
+          {% for did, code in DRIVER_CODES.items() %}
+          <option value="{{ did }}">{{ code }}</option>
+          {% endfor %}
+        </select>
+        <select id="whatif-action">
+          <option value="driver_pits">Pits Now</option>
+          <option value="driver_retires">Retires</option>
+          <option value="driver_penalty">+5s Penalty</option>
+          <option value="driver_spin">Spin (-3)</option>
+        </select>
+        <select id="whatif-compound">
+          <option value="SOFT">Soft</option>
+          <option value="MEDIUM">Medium</option>
+          <option value="HARD">Hard</option>
+        </select>
+        <button class="whatif-btn whatif-add" id="whatif-add-driver">+</button>
+      </div>
+
+      <div id="whatif-stack" class="whatif-stack"></div>
+      <button class="whatif-simulate" id="whatif-simulate" disabled>Simulate</button>
+
+      <div id="whatif-results" class="whatif-results" style="display:none">
+        <div class="whatif-elapsed" id="whatif-elapsed"></div>
+        <table class="whatif-table">
+          <thead><tr><th>#</th><th>Driver</th><th>Now</th><th>If</th><th>Δ Win</th></tr></thead>
+          <tbody id="whatif-tbody"></tbody>
+        </table>
+        <div class="whatif-verdict" id="whatif-verdict"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ COL 4: RACE CONTEXT (340px) ═══════ -->
   <div class="panel">
 
     {# Circuit Profile #}
@@ -226,7 +540,66 @@
       {% endif %}
     </div>
 
-    {# Circuit Performance — drivers' history at this track #}
+    {# Weather Forecast #}
+    {% if race_weather is defined and race_weather is not none %}
+    <div class="section">
+      <div class="section-title">Weather Forecast <span class="tag">race day</span></div>
+      <div class="kv-grid">
+        {% set temp = race_weather.get('forecast_temp') %}
+        {% set rain = race_weather.get('forecast_rain_prob') %}
+        {% set wind = race_weather.get('forecast_wind_speed') %}
+        {% if temp is not none %}
+        <div class="kv"><span class="kv-label">Temperature</span><span class="kv-val">{{ "%.0f"|format(temp) }}°C</span></div>
+        {% endif %}
+        {% if rain is not none %}
+        <div class="kv"><span class="kv-label">Rain Probability</span><span class="kv-val {{ 'dnf-warn' if rain > 40 else ('drop' if rain > 70 else 'dim') }}">{{ "%.0f"|format(rain) }}%</span></div>
+        {% endif %}
+        {% if wind is not none %}
+        <div class="kv"><span class="kv-label">Wind Speed</span><span class="kv-val {{ 'dnf-warn' if wind > 30 else 'dim' }}">{{ "%.0f"|format(wind) }} km/h</span></div>
+        {% endif %}
+      </div>
+      <div style="margin-top:4px;font-size:11px;font-weight:600">
+        {% if rain is not none %}
+          {% if rain >= 60 %}
+          <span class="drop">RAIN — Wet race likely</span>
+          {% elif rain >= 30 %}
+          <span class="dnf-warn">WET RISK — Rain possible</span>
+          {% else %}
+          <span class="gain">DRY — Low rain probability</span>
+          {% endif %}
+        {% endif %}
+        {% if wind is not none and wind > 30 %}
+        <span class="dnf-warn" style="margin-left:8px">HIGH WIND</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    {# Constructor Performance Delta #}
+    {% if constructor_delta is defined and constructor_delta is not none and constructor_delta|length > 0 %}
+    <div class="section">
+      <div class="section-title">Team Performance Delta <span class="tag">vs prev round</span></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Team</th>
+            <th class="r">ELO Delta</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in constructor_delta.iterrows() %}
+          {% set d = row.elo_delta %}
+          <tr>
+            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span>{{ team_name(row.constructor_id) }}</td>
+            <td class="r {{ 'gain' if d > 5 else ('drop' if d < -5 else 'dim') }}">{% if d > 0 %}▲{% elif d < 0 %}▼{% else %}—{% endif %} {{ "%+.1f"|format(d) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {# Track Specialists #}
     {% set cd = race_context.circuit_drivers %}
     {% if cd is not none and cd|length > 0 %}
     <div class="section">
@@ -257,6 +630,40 @@
             <td class="r dim">{{ "%.1f"|format(row.circuit_quali_avg) if row.circuit_quali_avg|notnan else '-' }}</td>
             {% endif %}
           </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {# Teammate Head-to-Head #}
+    {% if driver_form is not none and driver_form|length > 0 and 'h2h_quali_rate' in driver_form.columns %}
+    <div class="section">
+      <div class="section-title">Teammate H2H <span class="tag">qualifying</span></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Driver</th>
+            <th class="r">Q Rate</th>
+            {% if 'teammate_elo_diff' in driver_form.columns %}
+            <th class="r">ELO Δ</th>
+            {% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in (form_by_h2h if form_by_h2h is defined else driver_form).iterrows() %}
+          {% set cid = row.get('constructor_id', '') %}
+          {% set h2h = row.h2h_quali_rate %}
+          {% if h2h|notnan %}
+          <tr>
+            <td><span class="tc" style="background:{{ team_color(cid) }}"></span>{{ driver_name(row.driver_id) }}</td>
+            <td class="r {{ 'gain' if h2h > 0.55 else ('drop' if h2h < 0.45 else 'dim') }}">{{ "%.0f"|format(h2h * 100) }}%</td>
+            {% if 'teammate_elo_diff' in driver_form.columns %}
+            {% set ed = row.teammate_elo_diff %}
+            <td class="r {{ 'gain' if ed > 20 else ('drop' if ed < -20 else 'dim') }}">{% if ed|notnan %}{{ "%+.0f"|format(ed) }}{% else %}-{% endif %}</td>
+            {% endif %}
+          </tr>
+          {% endif %}
           {% endfor %}
         </tbody>
       </table>
@@ -294,68 +701,6 @@
           {% endfor %}
         </tbody>
       </table>
-    </div>
-    {% endif %}
-
-    {# FP2 Race Pace #}
-    {% if driver_form is not none and driver_form|length > 0 and 'fp_delta_vs_field' in driver_form.columns %}
-    {% set fp_data = driver_form[driver_form['fp_delta_vs_field'].notna()] %}
-    {% if fp_data|length > 0 %}
-    <div class="section">
-      <div class="section-title">Practice Pace <span class="tag">FP2 long runs</span></div>
-      <table>
-        <thead>
-          <tr>
-            <th>Driver</th>
-            <th class="r">Delta</th>
-            {% if 'fp_total_laps' in driver_form.columns %}
-            <th class="r">Laps</th>
-            {% endif %}
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in fp_data.sort_values('fp_delta_vs_field').iterrows() %}
-          {% set cid = row.get('constructor_id', '') %}
-          {% set d = row.fp_delta_vs_field %}
-          <tr>
-            <td><span class="tc" style="background:{{ team_color(cid) }}"></span>{{ driver_name(row.driver_id) }}</td>
-            <td class="r {{ 'gain' if d < 0 else 'drop' }}">{{ "%+.3f"|format(d) }}s</td>
-            {% if 'fp_total_laps' in driver_form.columns %}
-            <td class="r dim">{{ row.fp_total_laps|int if row.fp_total_laps|notnan else '-' }}</td>
-            {% endif %}
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% endif %}
-    {% endif %}
-  </div>
-
-  <!-- ═══════ COL 3: DRIVER FORM ═══════ -->
-  <div class="panel">
-
-    {# Momentum Rankings #}
-    {% if driver_form is not none and driver_form|length > 0 and 'momentum_score' in driver_form.columns %}
-    <div class="section">
-      <div class="section-title">Momentum <span class="tag">weighted recent form</span></div>
-      <div class="chart">
-        {% set mdata = driver_form.head(10) %}
-        {% set max_mom = mdata.iloc[0].momentum_score if mdata|length > 0 and mdata.iloc[0].momentum_score > 0 else 1 %}
-        {% for i, row in mdata.iterrows() %}
-        {% set cid = row.get('constructor_id', '') %}
-        {% set m = row.momentum_score %}
-        {% if m|notnan %}
-        <div class="chart-row">
-          <span class="chart-label">{{ driver_name(row.driver_id) }}</span>
-          <div class="chart-bar-wrap">
-            <div class="chart-bar {{ 'accent-bar' if m > 0 else 'red-bar' }}" style="width:{{ ((m / max_mom * 100) if max_mom > 0 else 0)|round(1)|abs }}%"></div>
-          </div>
-          <span class="chart-val {{ 'gain' if m > 0 else 'drop' }}">{{ "%+.1f"|format(m) }}</span>
-        </div>
-        {% endif %}
-        {% endfor %}
-      </div>
     </div>
     {% endif %}
 
@@ -404,77 +749,42 @@
     </div>
     {% endif %}
 
-    {# Teammate Head-to-Head #}
-    {% if driver_form is not none and driver_form|length > 0 and 'h2h_quali_rate' in driver_form.columns %}
+    {# FP2 Race Pace #}
+    {% if driver_form is not none and driver_form|length > 0 and 'fp_delta_vs_field' in driver_form.columns %}
+    {% set fp_data = driver_form[driver_form['fp_delta_vs_field'].notna()] %}
+    {% if fp_data|length > 0 %}
     <div class="section">
-      <div class="section-title">Teammate H2H <span class="tag">qualifying</span></div>
+      <div class="section-title">Practice Pace <span class="tag">FP2 long runs</span></div>
       <table>
         <thead>
           <tr>
             <th>Driver</th>
-            <th class="r">Q Rate</th>
-            {% if 'teammate_elo_diff' in driver_form.columns %}
-            <th class="r">ELO Δ</th>
+            <th class="r">Delta</th>
+            {% if 'fp_total_laps' in driver_form.columns %}
+            <th class="r">Laps</th>
             {% endif %}
           </tr>
         </thead>
         <tbody>
-          {% for i, row in (form_by_h2h if form_by_h2h is defined else driver_form).iterrows() %}
+          {% for i, row in fp_data.sort_values('fp_delta_vs_field').iterrows() %}
           {% set cid = row.get('constructor_id', '') %}
-          {% set h2h = row.h2h_quali_rate %}
-          {% if h2h|notnan %}
+          {% set d = row.fp_delta_vs_field %}
           <tr>
             <td><span class="tc" style="background:{{ team_color(cid) }}"></span>{{ driver_name(row.driver_id) }}</td>
-            <td class="r {{ 'gain' if h2h > 0.55 else ('drop' if h2h < 0.45 else 'dim') }}">{{ "%.0f"|format(h2h * 100) }}%</td>
-            {% if 'teammate_elo_diff' in driver_form.columns %}
-            {% set ed = row.teammate_elo_diff %}
-            <td class="r {{ 'gain' if ed > 20 else ('drop' if ed < -20 else 'dim') }}">{% if ed|notnan %}{{ "%+.0f"|format(ed) }}{% else %}-{% endif %}</td>
+            <td class="r {{ 'gain' if d < 0 else 'drop' }}">{{ "%+.3f"|format(d) }}s</td>
+            {% if 'fp_total_laps' in driver_form.columns %}
+            <td class="r dim">{{ row.fp_total_laps|int if row.fp_total_laps|notnan else '-' }}</td>
             {% endif %}
           </tr>
-          {% endif %}
           {% endfor %}
         </tbody>
       </table>
     </div>
     {% endif %}
-
-    {# DNF Risk Breakdown #}
-    {% if driver_form is not none and driver_form|length > 0 and 'dnf_rate_last5' in driver_form.columns %}
-    <div class="section">
-      <div class="section-title">Reliability <span class="tag">DNF rates</span></div>
-      <table>
-        <thead>
-          <tr>
-            <th>Driver</th>
-            <th class="r">L5</th>
-            {% if 'dnf_rate_last10' in driver_form.columns %}<th class="r">L10</th>{% endif %}
-            {% if 'dnf_streak' in driver_form.columns %}<th class="r">Streak</th>{% endif %}
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in (form_by_dnf if form_by_dnf is defined else driver_form).iterrows() %}
-          {% set cid = row.get('constructor_id', '') %}
-          {% set d5 = row.dnf_rate_last5 %}
-          {% if d5|notnan and d5 > 0 %}
-          <tr>
-            <td><span class="tc" style="background:{{ team_color(cid) }}"></span>{{ driver_name(row.driver_id) }}</td>
-            <td class="r {{ 'dnf-high' if d5 >= 0.3 else ('dnf-warn' if d5 >= 0.2 else 'dim') }}">{{ "%.0f"|format(d5 * 100) }}%</td>
-            {% if 'dnf_rate_last10' in driver_form.columns %}
-            <td class="r dim">{{ "%.0f"|format(row.dnf_rate_last10 * 100) if row.dnf_rate_last10|notnan else '-' }}%</td>
-            {% endif %}
-            {% if 'dnf_streak' in driver_form.columns %}
-            <td class="r {{ 'dnf-high' if row.dnf_streak >= 2 else 'dim' }}">{{ row.dnf_streak|int if row.dnf_streak|notnan else '0' }}</td>
-            {% endif %}
-          </tr>
-          {% endif %}
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
     {% endif %}
   </div>
 
-  <!-- ═══════ COL 4: RESULTS ═══════ -->
+  <!-- ═══════ COL 5: ELO & FORM (340px) ═══════ -->
   <div class="panel">
 
     {# Prediction Accuracy (when race completed) #}
@@ -517,205 +827,29 @@
     </div>
     {% endif %}
 
-    {# Race Result #}
+    {# Model Performance (rolling metrics) #}
+    {% if model_perf is defined and model_perf is not none %}
     <div class="section">
-      <div class="section-title">Race Result <span class="tag">{{ event_name }}</span></div>
-      {% if race|length > 0 %}
-      <table>
-        <thead>
-          <tr>
-            <th class="c" style="width:24px">P</th>
-            <th>Driver</th>
-            <th>Team</th>
-            <th class="c">GRD</th>
-            <th class="c">+/-</th>
-            <th class="r">Pts</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in race.iterrows() %}
-          {% set p = row.position %}
-          {% set g = row.grid if row.grid|notnan else 0 %}
-          {% set delta = (g|int - p|int) if p|notnan and g|notnan else 0 %}
-          <tr>
-            <td class="c {{ p|pos_class }}">{{ p|int if p|notnan else '-' }}</td>
-            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span><span class="{{ 'bright' if p|notnan and p <= 3 }}">{{ driver_name(row.driver_id) }}</span></td>
-            <td class="dim">{{ team_name(row.constructor_id) }}</td>
-            <td class="c dim">{{ g|int if g else '-' }}</td>
-            <td class="c {{ delta|delta_class }}">{% if delta > 0 %}+{{ delta }}{% elif delta < 0 %}{{ delta }}{% else %}-{% endif %}</td>
-            <td class="r">{{ row.points|int if row.points|notnan else 0 }}</td>
-            <td class="{{ 'dnf-high' if row.status != 'Finished' and '+' not in (row.status or '') else 'dim' }}">{{ row.status|na }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="dim">Race not completed yet</p>
+      <div class="section-title">Model Performance <span class="tag">last {{ model_perf.n_races }} races</span></div>
+      <div class="stats">
+        <div class="stat">
+          <span class="label">Avg Brier</span>
+          <span class="value {{ 'gain' if model_perf.avg_brier < 0.05 else ('dnf-warn' if model_perf.avg_brier < 0.1 else 'drop') }}">{{ "%.3f"|format(model_perf.avg_brier) }}</span>
+        </div>
+        <div class="stat">
+          <span class="label">Pos MAE</span>
+          <span class="value {{ 'gain' if model_perf.avg_mae < 3 else ('dnf-warn' if model_perf.avg_mae < 5 else 'drop') }}">{{ "%.1f"|format(model_perf.avg_mae) }}</span>
+        </div>
+        <div class="stat">
+          <span class="label">Trend</span>
+          <span class="value {{ 'gain' if model_perf.trend == 'improving' else ('drop' if model_perf.trend == 'declining' else 'dim') }}">{{ model_perf.trend|capitalize }}</span>
+        </div>
+      </div>
+      {% if model_perf.mae_scores|length > 1 %}
+      <div style="margin-top:4px;font-size:10px;color:var(--text-dim)">
+        MAE trend: {% for m in model_perf.mae_scores %}{{ "%.1f"|format(m) }}{% if not loop.last %} → {% endif %}{% endfor %}
+      </div>
       {% endif %}
-    </div>
-
-    {# Sprint #}
-    {% if sprint is not none and sprint|length > 0 %}
-    <div class="section">
-      <div class="section-title">Sprint Race</div>
-      <table>
-        <thead>
-          <tr>
-            <th class="c" style="width:24px">P</th>
-            <th>Driver</th>
-            <th class="c">GRD</th>
-            <th class="r">Pts</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in sprint.iterrows() %}
-          {% set p = row.position %}
-          <tr>
-            <td class="c {{ p|pos_class }}">{{ p|int if p|notnan else '-' }}</td>
-            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span>{{ driver_name(row.driver_id) }}</td>
-            <td class="c dim">{{ row.grid|int if row.grid|notnan else '-' }}</td>
-            <td class="r">{{ row.points|int if row.points|notnan else 0 }}</td>
-            <td class="dim">{{ row.status|na }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% endif %}
-
-    {# Qualifying #}
-    <div class="section">
-      <div class="section-title">Qualifying <span class="tag">{{ season }} R{{ race_round }}</span></div>
-      {% if quali|length > 0 %}
-      <table>
-        <thead>
-          <tr>
-            <th class="c" style="width:24px">P</th>
-            <th>Driver</th>
-            <th class="r">Q1</th>
-            <th class="r">Q2</th>
-            <th class="r">Q3</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in quali.iterrows() %}
-          {% set p = row.position %}
-          <tr>
-            <td class="c {{ p|pos_class }}">{{ p|int if p|notnan else '-' }}</td>
-            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span>{{ driver_name(row.driver_id) }}</td>
-            <td class="r dim">{{ row.q1|na }}</td>
-            <td class="r dim">{{ row.q2|na }}</td>
-            <td class="r">{{ row.q3|na }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="dim">No qualifying data</p>
-      {% endif %}
-    </div>
-  </div>
-
-  <!-- ═══════ COL 5: CHAMPIONSHIP ═══════ -->
-  <div class="panel">
-
-    {# Driver standings #}
-    <div class="section">
-      <div class="section-title">Drivers Championship <span class="tag">{{ season }}</span></div>
-      {% if drivers|length > 0 %}
-      <table>
-        <thead>
-          <tr>
-            <th class="c" style="width:24px">P</th>
-            <th>Driver</th>
-            <th class="r">Pts</th>
-            <th class="r">W</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in drivers.iterrows() %}
-          {% set cid = row.get('constructor_id', '') %}
-          <tr>
-            <td class="c {{ row.position|pos_class }}">{{ row.position|int }}</td>
-            <td><span class="tc" style="background:{{ team_color(cid) }}"></span><span class="{{ 'bright' if row.position <= 3 }}">{{ driver_name(row.driver_id) }}</span></td>
-            <td class="r bright">{{ row.points|int }}</td>
-            <td class="r dim">{{ row.wins|int }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="dim">No standings data</p>
-      {% endif %}
-    </div>
-
-    {# Constructor standings with ELO #}
-    <div class="section">
-      <div class="section-title">Constructors</div>
-      {% if constructors|length > 0 %}
-      <table>
-        <thead>
-          <tr>
-            <th class="c" style="width:24px">P</th>
-            <th>Team</th>
-            <th class="r">Pts</th>
-            {% if constructor_elo_map %}
-            <th class="r">ELO</th>
-            {% endif %}
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in constructors.iterrows() %}
-          <tr>
-            <td class="c {{ row.position|pos_class }}">{{ row.position|int }}</td>
-            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span><span class="{{ 'bright' if row.position <= 3 }}">{{ team_name(row.constructor_id) }}</span></td>
-            <td class="r bright">{{ row.points|int }}</td>
-            {% if constructor_elo_map %}
-            <td class="r dim">{{ constructor_elo_map.get(row.constructor_id, '-') }}</td>
-            {% endif %}
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="dim">No standings data</p>
-      {% endif %}
-    </div>
-
-    {# Constructor Development Trend #}
-    {% if constructor_trends is not none and constructor_trends|length > 0 %}
-    <div class="section">
-      <div class="section-title">Constructor Trends <span class="tag">development</span></div>
-      <table>
-        <thead>
-          <tr>
-            <th>Team</th>
-            {% if 'constructor_pace_jump' in constructor_trends.columns %}<th class="r">Pace Δ</th>{% endif %}
-            {% if 'constructor_season_trend' in constructor_trends.columns %}<th class="r">Trend</th>{% endif %}
-            {% if 'constructor_season_avg' in constructor_trends.columns %}<th class="r">Avg</th>{% endif %}
-          </tr>
-        </thead>
-        <tbody>
-          {% for i, row in constructor_trends.iterrows() %}
-          <tr>
-            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span>{{ team_name(row.constructor_id) }}</td>
-            {% if 'constructor_pace_jump' in constructor_trends.columns %}
-            {% set pj = row.constructor_pace_jump %}
-            <td class="r {{ 'gain' if pj > 0.5 else ('drop' if pj < -0.5 else 'dim') }}">{% if pj|notnan %}{{ "%+.1f"|format(pj) }}{% else %}-{% endif %}</td>
-            {% endif %}
-            {% if 'constructor_season_trend' in constructor_trends.columns %}
-            {% set st = row.constructor_season_trend %}
-            <td class="r {{ 'gain' if st < 0 else ('drop' if st > 0 else 'dim') }}">{% if st|notnan %}{{ "%+.1f"|format(st) }}{% else %}-{% endif %}</td>
-            {% endif %}
-            {% if 'constructor_season_avg' in constructor_trends.columns %}
-            <td class="r dim">{{ "%.1f"|format(row.constructor_season_avg) if row.constructor_season_avg|notnan else '-' }}</td>
-            {% endif %}
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
     </div>
     {% endif %}
 
@@ -755,16 +889,191 @@
       </table>
     </div>
     {% endif %}
-  </div>
 
-  <!-- ═══════ COL 6: NEWS FEED ═══════ -->
-  <div class="panel">
+    {# Sprint #}
+    {% if sprint is not none and sprint|length > 0 %}
     <div class="section">
-      <div class="section-title">News Feed <span class="tag">RSS</span></div>
-      <div id="news-feed">
-        <p class="dim">Loading...</p>
+      <div class="section-title">Sprint Race</div>
+      <table>
+        <thead>
+          <tr>
+            <th class="c" style="width:24px">P</th>
+            <th>Driver</th>
+            <th class="c">GRD</th>
+            <th class="r">Pts</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in sprint.iterrows() %}
+          {% set p = row.position %}
+          <tr>
+            <td class="c {{ p|pos_class }}">{{ p|int if p|notnan else '-' }}</td>
+            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span>{{ driver_name(row.driver_id) }}</td>
+            <td class="c dim">{{ row.grid|int if row.grid|notnan else '-' }}</td>
+            <td class="r">{{ row.points|int if row.points|notnan else 0 }}</td>
+            <td class="dim">{{ row.status|na }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {# Momentum Rankings #}
+    {% if driver_form is not none and driver_form|length > 0 and 'momentum_score' in driver_form.columns %}
+    <div class="section">
+      <div class="section-title">Momentum <span class="tag">weighted recent form</span></div>
+      <div class="chart">
+        {% set mdata = driver_form.head(10) %}
+        {% set max_mom = mdata.iloc[0].momentum_score if mdata|length > 0 and mdata.iloc[0].momentum_score > 0 else 1 %}
+        {% for i, row in mdata.iterrows() %}
+        {% set cid = row.get('constructor_id', '') %}
+        {% set m = row.momentum_score %}
+        {% if m|notnan %}
+        <div class="chart-row">
+          <span class="chart-label">{{ driver_name(row.driver_id) }}</span>
+          <div class="chart-bar-wrap">
+            <div class="chart-bar {{ 'accent-bar' if m > 0 else 'red-bar' }}" style="width:{{ ((m / max_mom * 100) if max_mom > 0 else 0)|round(1)|abs }}%"></div>
+          </div>
+          <span class="chart-val {{ 'gain' if m > 0 else 'drop' }}">{{ "%+.1f"|format(m) }}</span>
+        </div>
+        {% endif %}
+        {% endfor %}
       </div>
     </div>
+    {% endif %}
+
+    {# Reliability / DNF Risk Breakdown #}
+    {% if driver_form is not none and driver_form|length > 0 and 'dnf_rate_last5' in driver_form.columns %}
+    <div class="section">
+      <div class="section-title">Reliability <span class="tag">DNF rates</span></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Driver</th>
+            <th class="r">L5</th>
+            {% if 'dnf_rate_last10' in driver_form.columns %}<th class="r">L10</th>{% endif %}
+            {% if 'dnf_streak' in driver_form.columns %}<th class="r">Streak</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in (form_by_dnf if form_by_dnf is defined else driver_form).iterrows() %}
+          {% set cid = row.get('constructor_id', '') %}
+          {% set d5 = row.dnf_rate_last5 %}
+          {% if d5|notnan and d5 > 0 %}
+          <tr>
+            <td><span class="tc" style="background:{{ team_color(cid) }}"></span>{{ driver_name(row.driver_id) }}</td>
+            <td class="r {{ 'dnf-high' if d5 >= 0.3 else ('dnf-warn' if d5 >= 0.2 else 'dim') }}">{{ "%.0f"|format(d5 * 100) }}%</td>
+            {% if 'dnf_rate_last10' in driver_form.columns %}
+            <td class="r dim">{{ "%.0f"|format(row.dnf_rate_last10 * 100) if row.dnf_rate_last10|notnan else '-' }}%</td>
+            {% endif %}
+            {% if 'dnf_streak' in driver_form.columns %}
+            <td class="r {{ 'dnf-high' if row.dnf_streak >= 2 else 'dim' }}">{{ row.dnf_streak|int if row.dnf_streak|notnan else '0' }}</td>
+            {% endif %}
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {# Standings — moved here from old News column #}
+    <div class="section">
+      <div class="section-title">Drivers Championship <span class="tag">{{ season }}</span></div>
+      {% if drivers|length > 0 %}
+      <table>
+        <thead>
+          <tr>
+            <th class="c" style="width:24px">P</th>
+            <th>Driver</th>
+            <th class="r">Pts</th>
+            <th class="r">W</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in drivers.iterrows() %}
+          {% set cid = row.get('constructor_id', '') %}
+          <tr>
+            <td class="c {{ row.position|pos_class }}">{{ row.position|int }}</td>
+            <td><span class="tc" style="background:{{ team_color(cid) }}"></span><span class="{{ 'bright' if row.position <= 3 }}">{{ driver_name(row.driver_id) }}</span></td>
+            <td class="r bright">{{ row.points|int }}</td>
+            <td class="r dim">{{ row.wins|int }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="dim">No standings data</p>
+      {% endif %}
+    </div>
+
+    <div class="section">
+      <div class="section-title">Constructors</div>
+      {% if constructors|length > 0 %}
+      <table>
+        <thead>
+          <tr>
+            <th class="c" style="width:24px">P</th>
+            <th>Team</th>
+            <th class="r">Pts</th>
+            {% if constructor_elo_map %}
+            <th class="r">ELO</th>
+            {% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in constructors.iterrows() %}
+          <tr>
+            <td class="c {{ row.position|pos_class }}">{{ row.position|int }}</td>
+            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span><span class="{{ 'bright' if row.position <= 3 }}">{{ team_name(row.constructor_id) }}</span></td>
+            <td class="r bright">{{ row.points|int }}</td>
+            {% if constructor_elo_map %}
+            <td class="r dim">{{ constructor_elo_map.get(row.constructor_id, '-') }}</td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="dim">No standings data</p>
+      {% endif %}
+    </div>
+
+    {% if constructor_trends is not none and constructor_trends|length > 0 %}
+    <div class="section">
+      <div class="section-title">Constructor Trends <span class="tag">development</span></div>
+      <table>
+        <thead>
+          <tr>
+            <th>Team</th>
+            {% if 'constructor_pace_jump' in constructor_trends.columns %}<th class="r">Pace Δ</th>{% endif %}
+            {% if 'constructor_season_trend' in constructor_trends.columns %}<th class="r">Trend</th>{% endif %}
+            {% if 'constructor_season_avg' in constructor_trends.columns %}<th class="r">Avg</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for i, row in constructor_trends.iterrows() %}
+          <tr>
+            <td><span class="tc" style="background:{{ team_color(row.constructor_id) }}"></span>{{ team_name(row.constructor_id) }}</td>
+            {% if 'constructor_pace_jump' in constructor_trends.columns %}
+            {% set pj = row.constructor_pace_jump %}
+            <td class="r {{ 'gain' if pj > 0.5 else ('drop' if pj < -0.5 else 'dim') }}">{% if pj|notnan %}{{ "%+.1f"|format(pj) }}{% else %}-{% endif %}</td>
+            {% endif %}
+            {% if 'constructor_season_trend' in constructor_trends.columns %}
+            {% set st = row.constructor_season_trend %}
+            <td class="r {{ 'gain' if st < 0 else ('drop' if st > 0 else 'dim') }}">{% if st|notnan %}{{ "%+.1f"|format(st) }}{% else %}-{% endif %}</td>
+            {% endif %}
+            {% if 'constructor_season_avg' in constructor_trends.columns %}
+            <td class="r dim">{{ "%.1f"|format(row.constructor_season_avg) if row.constructor_season_avg|notnan else '-' }}</td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
   </div>
 
 </div>
@@ -805,12 +1114,15 @@
   function runPredict(mode) {
     const status = document.getElementById('predict-status');
     const btnPredict = document.getElementById('btn-predict');
+    const btnPrerace = document.getElementById('btn-prerace');
     const btnFull = document.getElementById('btn-full');
 
     btnPredict.disabled = true;
+    btnPrerace.disabled = true;
     btnFull.disabled = true;
     status.className = 'topbar-meta';
-    status.textContent = mode === 'full' ? 'updating...' : 'predicting...';
+    var labels = {full: 'updating...', prerace: 'pre-race workflow...', predict: 'predicting...'};
+    status.textContent = labels[mode] || 'running...';
 
     fetch('/api/predict', {
       method: 'POST',
@@ -829,6 +1141,7 @@
       status.className = 'topbar-meta drop';
       status.textContent = 'failed to start';
       btnPredict.disabled = false;
+      btnPrerace.disabled = false;
       btnFull.disabled = false;
     });
   }
@@ -846,6 +1159,7 @@
             status.textContent = 'error: ' + data.error.slice(0, 80);
             status.title = data.error;
             document.getElementById('btn-predict').disabled = false;
+            document.getElementById('btn-prerace').disabled = false;
             document.getElementById('btn-full').disabled = false;
           } else {
             status.className = 'topbar-meta gain';
@@ -855,6 +1169,1026 @@
         });
     }, 3000);
   }
+
+  // ===== Circuit Map — shared canvas for Live + Replay =====
+  var trackMap = (function() {
+    var canvas = document.getElementById('track-map');
+    if (!canvas) return {};
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+
+    // Team colors — generated from TEAM_COLORS_HEX (shared.py) to stay in sync
+    var TEAM_COLORS = {
+      {% for team, hex in TEAM_COLORS_HEX.items() %}{{ team }}: '{{ hex }}'{% if not loop.last %}, {% endif %}{% endfor %},
+      unknown: '#888888'
+    };
+
+    // Current mode: 'live' or 'replay'
+    var mode = 'live';
+
+    // ---------- Shared rendering state ----------
+    var trackOutline = [];
+    var drivers = [];       // [{id, code, team, x, y, position}, ...]
+    var prevDrivers = {};
+    var animDrivers = {};
+    var isLive = false;
+    var statusEl = document.getElementById('track-map-status');
+    var tagEl = document.getElementById('track-map-tag');
+    var bounds = { minX: 0, maxX: 1, minY: 0, maxY: 1 };
+
+    function computeBounds(outline, driverList) {
+      var xs = outline.map(function(p) { return p[0]; });
+      var ys = outline.map(function(p) { return p[1]; });
+      if (driverList) {
+        driverList.forEach(function(d) {
+          if (d.x != null) { xs.push(d.x); ys.push(d.y); }
+        });
+      }
+      if (xs.length === 0) return;
+      var pad = 0.05;
+      var mnx = Math.min.apply(null, xs), mxx = Math.max.apply(null, xs);
+      var mny = Math.min.apply(null, ys), mxy = Math.max.apply(null, ys);
+      var rx = mxx - mnx || 1, ry = mxy - mny || 1;
+      bounds.minX = mnx - rx * pad;
+      bounds.maxX = mxx + rx * pad;
+      bounds.minY = mny - ry * pad;
+      bounds.maxY = mxy + ry * pad;
+    }
+
+    function toCanvas(x, y) {
+      var w = canvas.width / dpr;
+      var h = canvas.height / dpr;
+      var rx = bounds.maxX - bounds.minX || 1;
+      var ry = bounds.maxY - bounds.minY || 1;
+      var scaleX = w / rx;
+      var scaleY = h / ry;
+      var scale = Math.min(scaleX, scaleY);
+      var offX = (w - rx * scale) / 2;
+      var offY = (h - ry * scale) / 2;
+      return [
+        offX + (x - bounds.minX) * scale,
+        offY + (bounds.maxY - y) * scale
+      ];
+    }
+
+    function resizeCanvas() {
+      var wrap = canvas.parentElement;
+      var rect = wrap.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      canvas.style.width = rect.width + 'px';
+      canvas.style.height = rect.height + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function draw() {
+      var w = canvas.width / dpr;
+      var h = canvas.height / dpr;
+      var isDark = html.getAttribute('data-theme') !== 'light';
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Draw track outline
+      if (trackOutline.length > 1) {
+        ctx.beginPath();
+        ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.12)';
+        ctx.lineWidth = 3;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        var p0 = toCanvas(trackOutline[0][0], trackOutline[0][1]);
+        ctx.moveTo(p0[0], p0[1]);
+        for (var i = 1; i < trackOutline.length; i++) {
+          var p = toCanvas(trackOutline[i][0], trackOutline[i][1]);
+          ctx.lineTo(p[0], p[1]);
+        }
+        ctx.stroke();
+      }
+
+      // Draw driver dots
+      var dotRadius = 4;
+      var sorted = drivers.slice().sort(function(a, b) { return (b.position || 99) - (a.position || 99); });
+      sorted.forEach(function(d) {
+        var ax = animDrivers[d.id];
+        if (!ax || ax.x == null) return;
+        var pos = toCanvas(ax.x, ax.y);
+        var color = TEAM_COLORS[d.team] || TEAM_COLORS.unknown;
+
+        // Glow
+        ctx.beginPath();
+        ctx.arc(pos[0], pos[1], dotRadius + 2, 0, Math.PI * 2);
+        ctx.fillStyle = color + '40';
+        ctx.fill();
+
+        // Dot
+        ctx.beginPath();
+        ctx.arc(pos[0], pos[1], dotRadius, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+
+        // Position number inside dot
+        if (d.position && d.position <= 20) {
+          ctx.fillStyle = isDark ? '#000' : '#fff';
+          ctx.font = 'bold 6px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(d.position, pos[0], pos[1]);
+        }
+
+        // Driver code label
+        ctx.fillStyle = isDark ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.7)';
+        ctx.font = '8px "SF Mono", "Consolas", monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(d.code, pos[0] + dotRadius + 3, pos[1]);
+      });
+
+      // "No data" message
+      if (trackOutline.length === 0 && drivers.length === 0) {
+        ctx.fillStyle = isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)';
+        ctx.font = '11px "SF Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        if (mode === 'replay') {
+          ctx.fillText('Select a race session above', w / 2, h / 2);
+        } else {
+          ctx.fillText('Waiting for live session...', w / 2, h / 2);
+          ctx.fillText('POST /live/start to begin', w / 2, h / 2 + 16);
+        }
+      }
+    }
+
+    // ---------- Live mode: SSE-based interpolation ----------
+    var animFrame = null;
+    var lastAnimTime = 0;
+    var LERP_DURATION = 4000;
+
+    function animLoop(now) {
+      if (mode !== 'live') return;
+      if (!lastAnimTime) lastAnimTime = now;
+      var dt = now - lastAnimTime;
+      var t = Math.min(dt / LERP_DURATION, 1);
+      var ease = 1 - Math.pow(1 - t, 3);
+
+      drivers.forEach(function(d) {
+        var prev = prevDrivers[d.id];
+        if (!prev || prev.x == null || d.x == null) {
+          animDrivers[d.id] = { x: d.x, y: d.y };
+          return;
+        }
+        animDrivers[d.id] = {
+          x: prev.x + (d.x - prev.x) * ease,
+          y: prev.y + (d.y - prev.y) * ease
+        };
+      });
+      draw();
+      if (t >= 1) { animFrame = null; } else { animFrame = requestAnimationFrame(animLoop); }
+    }
+
+    function startAnim() {
+      if (animFrame) cancelAnimationFrame(animFrame);
+      lastAnimTime = 0;
+      animFrame = requestAnimationFrame(animLoop);
+    }
+
+    function fetchTrack() {
+      fetch('/live/track')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.outline && data.outline.length > 0) {
+            trackOutline = data.outline;
+            computeBounds(trackOutline, drivers);
+            draw();
+          }
+        })
+        .catch(function() {});
+    }
+
+    var activeEventSource = null;
+
+    function connectStream() {
+      if (activeEventSource) return;
+      var es = new EventSource('/live/stream');
+      activeEventSource = es;
+
+      es.onmessage = function(e) {
+        if (mode !== 'live') return;
+        var data;
+        try { data = JSON.parse(e.data); } catch(err) { return; }
+
+        // Forward to live probability engine
+        if (window._onLiveSSEData) {
+          try { window._onLiveSSEData(data); } catch(err) {}
+        }
+
+        if (data.status === 'waiting' || data.status === 'no_change') {
+          if (data.status === 'waiting') {
+            statusEl.textContent = 'waiting';
+            statusEl.className = 'track-map-status';
+            tagEl.textContent = 'waiting';
+          }
+          return;
+        }
+
+        if (data.locations && data.locations.length > 0) {
+          prevDrivers = {};
+          drivers.forEach(function(d) {
+            var ax = animDrivers[d.id];
+            if (ax) prevDrivers[d.id] = { x: ax.x, y: ax.y };
+          });
+
+          drivers = data.locations.filter(function(d) { return d.x != null; });
+          computeBounds(trackOutline, drivers);
+
+          drivers.forEach(function(d) {
+            if (!animDrivers[d.id]) {
+              animDrivers[d.id] = { x: d.x, y: d.y };
+              prevDrivers[d.id] = { x: d.x, y: d.y };
+            }
+          });
+
+          if (!isLive) {
+            isLive = true;
+            statusEl.textContent = 'live';
+            statusEl.className = 'track-map-status live';
+            tagEl.textContent = 'live';
+          }
+          startAnim();
+        }
+      };
+
+      es.onerror = function() {
+        if (mode === 'live') {
+          statusEl.textContent = 'disconnected';
+          statusEl.className = 'track-map-status';
+          tagEl.textContent = 'offline';
+          isLive = false;
+        }
+      };
+    }
+
+    function disconnectStream() {
+      if (activeEventSource) {
+        activeEventSource.close();
+        activeEventSource = null;
+      }
+      if (animFrame) {
+        cancelAnimationFrame(animFrame);
+        animFrame = null;
+      }
+    }
+
+    // ---------- Mode switching ----------
+    function setMode(newMode) {
+      mode = newMode;
+      if (mode === 'live') {
+        connectStream();
+        fetchTrack();
+      } else {
+        disconnectStream();
+      }
+      // Clear canvas state when switching
+      drivers = [];
+      animDrivers = {};
+      prevDrivers = {};
+      trackOutline = [];
+      draw();
+    }
+
+    // ---------- Public API for replay engine ----------
+    function setReplayFrame(outline, driverList) {
+      if (mode !== 'replay') return;
+      trackOutline = outline;
+      drivers = driverList;
+      driverList.forEach(function(d) {
+        animDrivers[d.id] = { x: d.x, y: d.y };
+      });
+      computeBounds(outline, driverList);
+      draw();
+    }
+
+    // Initialize
+    resizeCanvas();
+    window.addEventListener('resize', function() { resizeCanvas(); draw(); });
+    window.addEventListener('beforeunload', function() {
+      disconnectStream();
+    });
+
+    fetchTrack();
+    connectStream();
+    draw();
+
+    return {
+      setMode: setMode,
+      setReplayFrame: setReplayFrame,
+      resizeCanvas: resizeCanvas,
+      draw: draw,
+      TEAM_COLORS: TEAM_COLORS,
+    };
+  })();
+
+  // ===== Race Replay Engine =====
+  (function() {
+    var replayData = null;       // Full replay dataset from API
+    var isPlaying = false;
+    var speed = 1;
+    var currentTimeMs = 0;       // Current replay position in ms
+    var lastFrameTime = 0;       // Real wall-clock time of last frame
+    var replayAnimFrame = null;
+    var buildPollTimer = null;
+
+    // DOM elements
+    var controlsEl = document.getElementById('replay-controls');
+    var sessionSelect = document.getElementById('replay-session-select');
+    var loadStatus = document.getElementById('replay-load-status');
+    var progressBar = document.getElementById('replay-progress-bar');
+    var progressFill = document.getElementById('replay-progress-fill');
+    var progressText = document.getElementById('replay-progress-text');
+    var playerEl = document.getElementById('replay-player');
+    var playBtn = document.getElementById('replay-play-btn');
+    var elapsedEl = document.getElementById('replay-elapsed');
+    var scrubber = document.getElementById('replay-scrubber');
+    var lapEl = document.getElementById('replay-lap');
+    var trackStatusEl = document.getElementById('replay-track-status');
+    var modeToggle = document.getElementById('track-mode-toggle');
+    var tagEl = document.getElementById('track-map-tag');
+    var statusEl = document.getElementById('track-map-status');
+
+    // ---------- Mode toggle ----------
+    window.toggleTrackMode = function() {
+      if (!controlsEl) return;
+      var showing = controlsEl.style.display !== 'none';
+      if (showing) {
+        // Switch back to live
+        controlsEl.style.display = 'none';
+        modeToggle.textContent = 'Replay';
+        stopReplay();
+        if (buildPollTimer) { clearInterval(buildPollTimer); buildPollTimer = null; }
+        replayData = null;
+        trackMap.setMode('live');
+      } else {
+        // Switch to replay mode
+        controlsEl.style.display = '';
+        modeToggle.textContent = 'Live';
+        trackMap.setMode('replay');
+        loadSessions();
+      }
+    };
+
+    // ---------- Session list ----------
+    function loadSessions() {
+      loadStatus.textContent = 'loading...';
+      fetch('/live/replay/sessions')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          loadStatus.textContent = '';
+          if (!data.sessions || data.sessions.length === 0) {
+            loadStatus.textContent = 'No sessions available';
+            return;
+          }
+          // Clear existing options except the first
+          while (sessionSelect.options.length > 1) sessionSelect.remove(1);
+          data.sessions.forEach(function(s) {
+            var opt = document.createElement('option');
+            opt.value = s.session_key;
+            var label = s.circuit_short_name || s.session_name || 'Session ' + s.session_key;
+            if (s.country_name) label = s.country_name + ' — ' + label;
+            if (s.year) label = s.year + ' ' + label;
+            if (s.cached) label += ' [cached]';
+            opt.textContent = label;
+            sessionSelect.appendChild(opt);
+          });
+        })
+        .catch(function(err) {
+          loadStatus.textContent = 'Failed to load sessions';
+        });
+    }
+
+    // ---------- Session selection ----------
+    window.onReplaySessionChange = function(sessionKey) {
+      if (!sessionKey) {
+        replayData = null;
+        playerEl.style.display = 'none';
+        progressBar.style.display = 'none';
+        trackMap.setMode('replay'); // reset canvas
+        return;
+      }
+      fetchReplayData(parseInt(sessionKey));
+    };
+
+    function fetchReplayData(sessionKey) {
+      progressBar.style.display = '';
+      playerEl.style.display = 'none';
+      progressFill.style.width = '0%';
+      progressText.textContent = 'Requesting data...';
+      stopReplay();
+      replayData = null; // free previous session data
+
+      fetch('/live/replay/data/' + sessionKey)
+        .then(function(r) {
+          if (r.status === 202) {
+            // Building — poll for progress
+            return r.json().then(function(data) {
+              updateProgress(data);
+              startBuildPolling(sessionKey);
+              return null;
+            });
+          }
+          if (!r.ok) throw new Error('Failed to fetch replay data');
+          return r.json();
+        })
+        .then(function(data) {
+          if (data) onReplayDataReady(data);
+        })
+        .catch(function(err) {
+          progressText.textContent = 'Error: ' + err.message;
+        });
+    }
+
+    function startBuildPolling(sessionKey) {
+      if (buildPollTimer) clearInterval(buildPollTimer);
+      buildPollTimer = setInterval(function() {
+        fetch('/live/replay/status/' + sessionKey)
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            updateProgress(data);
+            if (data.status === 'done') {
+              clearInterval(buildPollTimer);
+              buildPollTimer = null;
+              // Now fetch the full data
+              fetch('/live/replay/data/' + sessionKey)
+                .then(function(r) { return r.json(); })
+                .then(function(fullData) { onReplayDataReady(fullData); });
+            } else if (data.status === 'error') {
+              clearInterval(buildPollTimer);
+              buildPollTimer = null;
+              progressText.textContent = 'Error: ' + data.message;
+            }
+          });
+      }, 2000);
+    }
+
+    function updateProgress(data) {
+      var pct = data.total > 0 ? Math.round(data.progress / data.total * 100) : 0;
+      progressFill.style.width = pct + '%';
+      progressText.textContent = data.message || ('Building: ' + pct + '%');
+    }
+
+    // ---------- Replay data ready ----------
+    function onReplayDataReady(data) {
+      replayData = data;
+      progressBar.style.display = 'none';
+      playerEl.style.display = '';
+
+      var durationMs = (data.duration_seconds || 0) * 1000;
+      scrubber.max = durationMs;
+      scrubber.value = 0;
+      currentTimeMs = 0;
+
+      tagEl.textContent = 'replay';
+      statusEl.textContent = data.session_name || 'replay';
+      statusEl.className = 'track-map-status';
+
+      lapEl.textContent = 'Lap 0/' + (data.total_laps || '?');
+      elapsedEl.textContent = '0:00:00';
+      trackStatusEl.textContent = '';
+
+      // Pre-process: for each driver, build a typed lookup for fast binary search
+      // Each driver's points array: [[offset_ms, x, y], ...]
+      // Already sorted by offset_ms from the backend
+
+      renderAtTime(0);
+    }
+
+    // ---------- Binary search + interpolation ----------
+    function getDriverPositionAtTime(driverPoints, timeMs) {
+      var n = driverPoints.length;
+      if (n === 0) return null;
+      if (timeMs <= driverPoints[0][0]) return { x: driverPoints[0][1], y: driverPoints[0][2] };
+      if (timeMs >= driverPoints[n - 1][0]) return { x: driverPoints[n - 1][1], y: driverPoints[n - 1][2] };
+
+      // Binary search for the bracketing pair
+      var lo = 0, hi = n - 1;
+      while (lo < hi - 1) {
+        var mid = (lo + hi) >> 1;
+        if (driverPoints[mid][0] <= timeMs) lo = mid;
+        else hi = mid;
+      }
+
+      var t0 = driverPoints[lo][0], t1 = driverPoints[hi][0];
+      var dt = t1 - t0;
+      if (dt === 0) return { x: driverPoints[lo][1], y: driverPoints[lo][2] };
+
+      var frac = (timeMs - t0) / dt;
+      return {
+        x: driverPoints[lo][1] + (driverPoints[hi][1] - driverPoints[lo][1]) * frac,
+        y: driverPoints[lo][2] + (driverPoints[hi][2] - driverPoints[lo][2]) * frac,
+      };
+    }
+
+    function renderAtTime(timeMs) {
+      if (!replayData) return;
+
+      var outline = replayData.track_outline || [];
+      var driverList = [];
+      var posIndex = 1;
+
+      var driverEntries = Object.entries(replayData.drivers);
+      // Sort by whoever is furthest along in their points array (rough position proxy)
+      driverEntries.sort(function(a, b) {
+        var ap = a[1].points, bp = b[1].points;
+        var aLast = ap.length > 0 ? ap[ap.length - 1][0] : 0;
+        var bLast = bp.length > 0 ? bp[bp.length - 1][0] : 0;
+        return bLast - aLast;
+      });
+
+      driverEntries.forEach(function(entry) {
+        var driverId = entry[0];
+        var dd = entry[1];
+        var pos = getDriverPositionAtTime(dd.points, timeMs);
+        if (pos) {
+          driverList.push({
+            id: driverId,
+            code: dd.code,
+            team: dd.team,
+            x: pos.x,
+            y: pos.y,
+            position: posIndex,
+          });
+          posIndex++;
+        }
+      });
+
+      trackMap.setReplayFrame(outline, driverList);
+
+      // Update lap indicator
+      var currentLap = 0;
+      if (replayData.laps) {
+        for (var i = replayData.laps.length - 1; i >= 0; i--) {
+          if (timeMs >= replayData.laps[i].timestamp_offset_ms) {
+            currentLap = replayData.laps[i].lap;
+            break;
+          }
+        }
+      }
+      lapEl.textContent = 'Lap ' + currentLap + '/' + (replayData.total_laps || '?');
+
+      // Update elapsed time display
+      var totalSec = Math.floor(timeMs / 1000);
+      var hrs = Math.floor(totalSec / 3600);
+      var mins = Math.floor((totalSec % 3600) / 60);
+      var secs = totalSec % 60;
+      elapsedEl.textContent = hrs + ':' + (mins < 10 ? '0' : '') + mins + ':' + (secs < 10 ? '0' : '') + secs;
+
+      // Update scrubber position (avoid triggering oninput)
+      scrubber.value = timeMs;
+
+      // Update track status from race_control events
+      var trackStatus = '';
+      if (replayData.race_control) {
+        for (var j = replayData.race_control.length - 1; j >= 0; j--) {
+          var evt = replayData.race_control[j];
+          if (timeMs >= evt.timestamp_offset_ms) {
+            if (evt.type === 'sc') { trackStatus = 'SAFETY CAR'; trackStatusEl.className = 'replay-track-status sc'; }
+            else if (evt.type === 'vsc') { trackStatus = 'VSC'; trackStatusEl.className = 'replay-track-status vsc'; }
+            else if (evt.type === 'red') { trackStatus = 'RED FLAG'; trackStatusEl.className = 'replay-track-status red'; }
+            else { trackStatus = ''; trackStatusEl.className = 'replay-track-status'; }
+            break;
+          }
+        }
+      }
+      trackStatusEl.textContent = trackStatus;
+    }
+
+    // ---------- Play/Pause ----------
+    window.toggleReplayPlay = function() {
+      if (isPlaying) {
+        stopReplay();
+      } else {
+        startReplay();
+      }
+    };
+
+    function startReplay() {
+      if (!replayData) return;
+      isPlaying = true;
+      playBtn.innerHTML = '&#9646;&#9646;'; // pause symbol
+      lastFrameTime = performance.now();
+
+      // If at the end, restart
+      var durationMs = (replayData.duration_seconds || 0) * 1000;
+      if (currentTimeMs >= durationMs) {
+        currentTimeMs = 0;
+      }
+
+      replayAnimFrame = requestAnimationFrame(replayLoop);
+    }
+
+    function stopReplay() {
+      isPlaying = false;
+      playBtn.innerHTML = '&#9654;'; // play symbol
+      if (replayAnimFrame) {
+        cancelAnimationFrame(replayAnimFrame);
+        replayAnimFrame = null;
+      }
+    }
+
+    function replayLoop(now) {
+      if (!isPlaying || !replayData) return;
+
+      var dt = now - lastFrameTime;
+      lastFrameTime = now;
+
+      // Advance replay time by dt * speed
+      currentTimeMs += dt * speed;
+
+      var durationMs = (replayData.duration_seconds || 0) * 1000;
+      if (currentTimeMs >= durationMs) {
+        currentTimeMs = durationMs;
+        renderAtTime(currentTimeMs);
+        stopReplay();
+        return;
+      }
+
+      renderAtTime(currentTimeMs);
+      replayAnimFrame = requestAnimationFrame(replayLoop);
+    }
+
+    // ---------- Scrubber ----------
+    window.onReplayScrub = function(value) {
+      currentTimeMs = parseFloat(value);
+      renderAtTime(currentTimeMs);
+      if (isPlaying) {
+        lastFrameTime = performance.now();
+      }
+    };
+
+    // ---------- Speed control ----------
+    window.setReplaySpeed = function(newSpeed) {
+      speed = newSpeed;
+      // Update button active states
+      var btns = document.querySelectorAll('.replay-speed-btn');
+      btns.forEach(function(btn) {
+        if (parseInt(btn.getAttribute('data-speed')) === newSpeed) {
+          btn.classList.add('active');
+        } else {
+          btn.classList.remove('active');
+        }
+      });
+    };
+  })();
+
+  // ===== Live Probability Engine =====
+  (function() {
+    var liveContainer = document.getElementById('live-prob-container');
+    var staticContainer = document.getElementById('static-pred-container');
+    var tbody = document.getElementById('live-prob-tbody');
+    var lapInfo = document.getElementById('live-lap-info');
+    var trackBadge = document.getElementById('live-track-badge');
+    var flashContainer = document.getElementById('event-flash-container');
+    var isLiveMode = false;
+    var prevWinProbs = {};
+    var sparklineCanvases = {};
+
+    // Team colors (reuse from track map)
+    var TEAM_COLORS = trackMap.TEAM_COLORS;
+
+    // Driver code lookup
+    var DRIVER_CODES = {
+      max_verstappen: 'VER', norris: 'NOR', leclerc: 'LEC', hamilton: 'HAM',
+      russell: 'RUS', piastri: 'PIA', alonso: 'ALO', stroll: 'STR',
+      gasly: 'GAS', ocon: 'OCO', albon: 'ALB', hulkenberg: 'HUL',
+      bottas: 'BOT', perez: 'PER', bearman: 'BEA', antonelli: 'ANT',
+      hadjar: 'HAD', lawson: 'LAW', colapinto: 'COL', bortoleto: 'BOR',
+      arvid_lindblad: 'LIN'
+    };
+
+    function driverName(id) {
+      var code = DRIVER_CODES[id];
+      if (code) return code;
+      return id ? id.substring(0, 3).toUpperCase() : '???';
+    }
+
+    function formatGap(gap) {
+      if (!gap || gap <= 0) return 'LEAD';
+      if (gap >= 9000) return 'DNF';
+      return '+' + gap.toFixed(1) + 's';
+    }
+
+    function tireLabel(compound, age) {
+      var c = (compound || 'U')[0].toUpperCase();
+      return c + ':' + (age || 0);
+    }
+
+    function tireColor(compound) {
+      var c = (compound || '').toLowerCase();
+      if (c === 'soft') return '#ff3333';
+      if (c === 'medium') return '#ffcc00';
+      if (c === 'hard') return '#ffffff';
+      if (c === 'intermediate') return '#33cc33';
+      if (c === 'wet') return '#3399ff';
+      return '#888888';
+    }
+
+    function enterLiveMode() {
+      if (isLiveMode) return;
+      isLiveMode = true;
+      liveContainer.style.display = '';
+      staticContainer.style.display = 'none';
+    }
+
+    function exitLiveMode() {
+      if (!isLiveMode) return;
+      isLiveMode = false;
+      liveContainer.style.display = 'none';
+      staticContainer.style.display = '';
+      prevWinProbs = {};
+      sparklineCanvases = {};
+    }
+
+    function deltaClass(delta) {
+      if (delta > 0.05) return 'prob-up-strong trend-up-strong';
+      if (delta > 0.02) return 'prob-up trend-up';
+      if (delta < -0.05) return 'prob-down-strong trend-down-strong';
+      if (delta < -0.02) return 'prob-down trend-down';
+      return 'dim';
+    }
+
+    function drawSparkline(canvas, data, color) {
+      if (!canvas || !data || data.length < 2) return;
+      var ctx = canvas.getContext('2d');
+      var w = canvas.width;
+      var h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+
+      var mn = Math.min.apply(null, data);
+      var mx = Math.max.apply(null, data);
+      var rng = mx - mn || 0.01;
+
+      ctx.beginPath();
+      ctx.strokeStyle = color || '#00ff88';
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = 'round';
+
+      for (var i = 0; i < data.length; i++) {
+        var x = (i / (data.length - 1)) * (w - 4) + 2;
+        var y = h - 2 - ((data[i] - mn) / rng) * (h - 4);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      // Draw current value dot
+      if (data.length > 0) {
+        var lastX = w - 2;
+        var lastY = h - 2 - ((data[data.length - 1] - mn) / rng) * (h - 4);
+        ctx.beginPath();
+        ctx.arc(lastX, lastY, 2, 0, Math.PI * 2);
+        ctx.fillStyle = color || '#00ff88';
+        ctx.fill();
+      }
+    }
+
+    function addEventFlash(events) {
+      if (!events || events.length === 0 || !flashContainer) return;
+      events.forEach(function(evt) {
+        var div = document.createElement('div');
+        div.className = 'event-flash';
+        div.innerHTML = '<span class="event-icon">&#9889;</span>' + evt.message;
+        flashContainer.insertBefore(div, flashContainer.firstChild);
+        // Auto-remove after 10s
+        setTimeout(function() {
+          if (div.parentNode) div.parentNode.removeChild(div);
+        }, 10000);
+      });
+      // Keep max 5 events visible
+      while (flashContainer.children.length > 5) {
+        flashContainer.removeChild(flashContainer.lastChild);
+      }
+    }
+
+    function updateLiveTable(data) {
+      if (!data.live_probabilities || data.live_probabilities.length === 0) return;
+      if (data.lap <= 0) return;
+
+      enterLiveMode();
+
+      // Update header info
+      lapInfo.textContent = 'Lap ' + data.lap + '/' + data.total_laps;
+
+      var status = data.track_status || 'clear';
+      if (status === 'sc') {
+        trackBadge.innerHTML = '<span class="live-track-badge sc">SC</span>';
+      } else if (status === 'vsc') {
+        trackBadge.innerHTML = '<span class="live-track-badge vsc">VSC</span>';
+      } else if (status === 'red') {
+        trackBadge.innerHTML = '<span class="live-track-badge red">RED</span>';
+      } else {
+        trackBadge.innerHTML = '';
+      }
+
+      // Sort by position
+      var probs = data.live_probabilities.slice().sort(function(a, b) {
+        return (a.position || 99) - (b.position || 99);
+      });
+
+      var history = data.probability_history || {};
+
+      // Build table rows
+      var html = '';
+      probs.forEach(function(row, idx) {
+        var did = row.driver_id;
+        var code = driverName(did);
+        var pos = row.position || '-';
+        var gap = formatGap(row.gap_to_leader);
+        var tire = tireLabel(row.tire_compound, row.tire_age);
+        var win = (row.live_win_prob * 100).toFixed(1);
+        var pod = (row.live_podium_prob * 100).toFixed(1);
+        var deltaWin = row.delta_win || 0;
+        var deltaFmt = (deltaWin >= 0 ? '+' : '') + (deltaWin * 100).toFixed(1);
+        var dCls = deltaClass(deltaWin);
+
+        // Position class
+        var pCls = '';
+        if (pos === 1) pCls = 'p1';
+        else if (pos === 2) pCls = 'p2';
+        else if (pos === 3) pCls = 'p3';
+
+        // Flash animation on delta cells
+        var prevWin = prevWinProbs[did] || 0;
+        var winShift = (row.live_win_prob || 0) - prevWin;
+        var flashCls = '';
+        if (Math.abs(winShift) > 0.02) {
+          flashCls = winShift > 0 ? 'prob-cell-flash-up' : 'prob-cell-flash-down';
+        }
+
+        // Tire color indicator
+        var tc = tireColor(row.tire_compound);
+
+        var retired = row.is_retired ? ' style="opacity:0.3"' : '';
+
+        html += '<tr' + retired + '>';
+        html += '<td class="c ' + pCls + '">' + pos + '</td>';
+        html += '<td><span class="tc" style="background:' + (TEAM_COLORS[(row.team || '')] || '#888') + '"></span><span class="' + (pos <= 3 ? 'bright' : '') + '">' + code + '</span></td>';
+        html += '<td class="c">P' + pos + '</td>';
+        html += '<td class="r dim">' + gap + '</td>';
+        html += '<td class="c" style="color:' + tc + '">' + tire + '</td>';
+        html += '<td class="r ' + flashCls + '"><span class="bar" style="width:' + (row.live_win_prob * 80) + 'px"></span>' + win + '</td>';
+        html += '<td class="r">' + pod + '</td>';
+        html += '<td class="r ' + dCls + '">' + deltaFmt + '</td>';
+        html += '<td class="c"><canvas class="sparkline-canvas" id="spark-' + did + '" width="100" height="40"></canvas></td>';
+        html += '</tr>';
+      });
+
+      tbody.innerHTML = html;
+
+      // Draw sparklines from history
+      probs.forEach(function(row) {
+        var did = row.driver_id;
+        var h = history[did];
+        if (h && h.win_prob && h.win_prob.length >= 2) {
+          var canvas = document.getElementById('spark-' + did);
+          if (canvas) {
+            drawSparkline(canvas, h.win_prob, '#00ff88');
+          }
+        }
+      });
+
+      // Store current win probs for next delta flash
+      prevWinProbs = {};
+      probs.forEach(function(row) {
+        prevWinProbs[row.driver_id] = row.live_win_prob || 0;
+      });
+
+      // Show event flashes
+      if (data.probability_events) {
+        addEventFlash(data.probability_events);
+      }
+    }
+
+    // Expose a global callback that the SSE handler calls on each tick.
+    // The track map IIFE's es.onmessage already forwards data here.
+    window._onLiveSSEData = function(data) {
+      if (data.live_probabilities) {
+        var teamMap = {};
+        if (data.locations) {
+          data.locations.forEach(function(loc) {
+            teamMap[loc.id] = loc.team;
+          });
+          data.live_probabilities.forEach(function(p) {
+            if (!p.team) p.team = teamMap[p.driver_id] || '';
+          });
+        }
+        updateLiveTable(data);
+      } else if (data.status === 'waiting') {
+        exitLiveMode();
+      }
+    };
+  })();
+
+  /* ═══════ What-If Scenario Simulator ═══════ */
+  (function() {
+    var stack = [];
+    var CODES = { {% for did, code in DRIVER_CODES.items() %}"{{ did }}": "{{ code }}"{% if not loop.last %}, {% endif %}{% endfor %} };
+
+    function actionLabel(t) {
+      return {driver_pits:'Pits',driver_retires:'DNF',driver_penalty:'+5s',driver_spin:'Spin'}[t]||t;
+    }
+    function tagLabel(s) {
+      if (s.type==='safety_car') return 'SC';
+      if (s.type==='vsc') return 'VSC';
+      if (s.type==='red_flag') return 'RED FLAG';
+      if (s.type==='rain') return 'RAIN';
+      var c = CODES[s.driver_id] || (s.driver_id||'').slice(0,3).toUpperCase();
+      return c + ' ' + actionLabel(s.type);
+    }
+
+    function renderStack() {
+      var el = document.getElementById('whatif-stack');
+      el.innerHTML = stack.map(function(s,i) {
+        return '<span class="whatif-tag">' + tagLabel(s) +
+               ' <span class="whatif-tag-x" data-idx="'+i+'">✕</span></span>';
+      }).join('');
+      document.getElementById('whatif-simulate').disabled = stack.length === 0;
+      el.querySelectorAll('.whatif-tag-x').forEach(function(x) {
+        x.addEventListener('click', function() {
+          stack.splice(parseInt(x.dataset.idx), 1);
+          renderStack();
+        });
+      });
+    }
+
+    // Preset buttons
+    document.querySelectorAll('.whatif-btn[data-scenario]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        stack.push(JSON.parse(btn.dataset.scenario));
+        renderStack();
+      });
+    });
+
+    // Show/hide compound selector
+    var actionSel = document.getElementById('whatif-action');
+    var compoundSel = document.getElementById('whatif-compound');
+    if (actionSel) actionSel.addEventListener('change', function() {
+      compoundSel.style.display = actionSel.value === 'driver_pits' ? 'inline-block' : 'none';
+    });
+
+    // Add driver action
+    var addBtn = document.getElementById('whatif-add-driver');
+    if (addBtn) addBtn.addEventListener('click', function() {
+      var did = document.getElementById('whatif-driver').value;
+      var action = document.getElementById('whatif-action').value;
+      if (!did) return;
+      var s = {type: action, driver_id: did};
+      if (action === 'driver_pits') s.compound = compoundSel.value;
+      if (action === 'driver_penalty') s.seconds = 5;
+      if (action === 'driver_spin') s.positions_lost = 3;
+      stack.push(s);
+      renderStack();
+    });
+
+    // Simulate
+    var simBtn = document.getElementById('whatif-simulate');
+    if (simBtn) simBtn.addEventListener('click', async function() {
+      simBtn.textContent = 'Simulating...';
+      simBtn.disabled = true;
+      var body = stack.length === 1
+        ? {scenario: stack[0]}
+        : {scenario: {scenarios: stack}};
+      try {
+        var res = await fetch('/live/whatif', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body)
+        });
+        var data = await res.json();
+        renderResults(data);
+      } catch(e) { console.error('What-if error:', e); }
+      simBtn.textContent = 'Simulate';
+      simBtn.disabled = false;
+    });
+
+    function renderResults(data) {
+      var container = document.getElementById('whatif-results');
+      container.style.display = 'block';
+      document.getElementById('whatif-elapsed').textContent =
+        data.sim_count + ' sims in ' + data.elapsed_ms + 'ms';
+
+      var movers = data.biggest_movers || [];
+      var tbody = document.getElementById('whatif-tbody');
+      tbody.innerHTML = movers.slice(0, 10).map(function(m, i) {
+        var cls = m.delta_win > 2 ? 'prob-up' : (m.delta_win < -2 ? 'prob-down' : '');
+        var arrow = m.delta_win > 5 ? '▲▲▲' : (m.delta_win > 2 ? '▲' :
+                    (m.delta_win < -5 ? '▼▼▼' : (m.delta_win < -2 ? '▼' : '—')));
+        var cw = data.current[m.driver_id] ? data.current[m.driver_id].win : 0;
+        var sw = data.scenario[m.driver_id] ? data.scenario[m.driver_id].win : 0;
+        return '<tr class="'+cls+'"><td>'+(i+1)+'</td><td>'+m.code+'</td>' +
+               '<td>'+cw.toFixed(1)+'%</td><td>'+sw.toFixed(1)+'%</td>' +
+               '<td>'+(m.delta_win>0?'+':'')+m.delta_win.toFixed(1)+'% '+arrow+'</td></tr>';
+      }).join('');
+
+      document.getElementById('whatif-verdict').textContent = data.verdict || '';
+    }
+  })();
 </script>
 </body>
 </html>

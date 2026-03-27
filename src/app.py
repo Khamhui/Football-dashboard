@@ -10,6 +10,9 @@ Usage:
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import threading
 import time
 from datetime import datetime
@@ -18,8 +21,11 @@ import feedparser
 import pandas as pd
 from flask import Flask, render_template, request, jsonify
 
+from pathlib import Path
+
 from src.shared import (
     DATA_DIR,
+    TEAM_COLORS_HEX,
     available_predictions,
     available_rounds,
     driver_name,
@@ -33,6 +39,11 @@ from src.shared import (
 import math
 
 app = Flask(__name__)
+
+# Register live prediction blueprint
+from src.live import live_bp
+from data.ingest.live_feed import DRIVER_CODES
+app.register_blueprint(live_bp)
 
 # ---------------------------------------------------------------------------
 # Data loaders (parquet files — cached by mtime)
@@ -61,6 +72,8 @@ app.jinja_env.globals.update(
     driver_name=driver_name,
     team_color=team_color_hex,
     team_name=team_name,
+    TEAM_COLORS_HEX=TEAM_COLORS_HEX,
+    DRIVER_CODES=DRIVER_CODES,
 )
 app.jinja_env.filters["notnan"] = lambda v: v is not None and (not isinstance(v, float) or not math.isnan(v))
 
@@ -302,6 +315,117 @@ def _build_constructor_trends(current: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def _load_weather(season: int, race_round: int) -> dict | None:
+    """Load cached weather forecast for a specific race."""
+    try:
+        from data.ingest.weather import build_weather_forecast_index
+        weather_index = build_weather_forecast_index(Path("data"))
+        return weather_index.get((season, race_round))
+    except Exception:
+        return None
+
+
+def _build_model_performance(
+    rr: pd.DataFrame, pred_set: set, season: int, race_round: int, n: int = 5,
+) -> dict | None:
+    """Compute rolling model performance (Brier score + MAE) over recent races with predictions + results."""
+    if rr.empty or not pred_set:
+        return None
+
+    # Collect past rounds that have both predictions and results
+    past_rounds = sorted(
+        [(s, r) for s, r in pred_set if s == season and r < race_round]
+        + [(s, r) for s, r in pred_set if s < season],
+        key=lambda x: (x[0], x[1]),
+        reverse=True,
+    )[:n]
+
+    if not past_rounds:
+        return None
+
+    brier_scores = []
+    mae_scores = []
+
+    for s, r in past_rounds:
+        pred = load_prediction(s, r)
+        race = rr[(rr["season"] == s) & (rr["round"] == r)]
+        if pred is None or pred.empty or race.empty or "driver_id" not in race.columns:
+            continue
+
+        merged = pred[["driver_id", "predicted_position", "sim_win_pct"]].merge(
+            race[["driver_id", "position"]].rename(columns={"position": "actual"}),
+            on="driver_id", how="inner",
+        )
+        if merged.empty:
+            continue
+
+        # Position MAE
+        mae = (merged["actual"] - merged["predicted_position"]).abs().mean()
+        mae_scores.append(float(mae))
+
+        # Brier score: mean squared error of win probability vs binary outcome
+        actual_winner = (merged["actual"] == 1).astype(float)
+        win_prob = merged["sim_win_pct"] / 100.0
+        brier = ((win_prob - actual_winner) ** 2).mean()
+        brier_scores.append(float(brier))
+
+    if len(brier_scores) < 2:
+        return None
+
+    # Determine trend: compare first half vs second half
+    mid = len(mae_scores) // 2
+    recent_mae = sum(mae_scores[:mid]) / mid if mid > 0 else mae_scores[0]
+    older_mae = sum(mae_scores[mid:]) / (len(mae_scores) - mid)
+
+    if recent_mae < older_mae - 0.3:
+        trend = "improving"
+    elif recent_mae > older_mae + 0.3:
+        trend = "declining"
+    else:
+        trend = "stable"
+
+    return {
+        "brier_scores": brier_scores,
+        "mae_scores": mae_scores,
+        "avg_brier": sum(brier_scores) / len(brier_scores),
+        "avg_mae": sum(mae_scores) / len(mae_scores),
+        "trend": trend,
+        "n_races": len(brier_scores),
+    }
+
+
+def _build_constructor_delta(
+    fm: pd.DataFrame, season: int, race_round: int,
+) -> pd.DataFrame:
+    """Compute constructor average predicted position delta vs previous round."""
+    if fm.empty or race_round <= 1:
+        return pd.DataFrame()
+
+    curr = fm[(fm["season"] == season) & (fm["round"] == race_round)]
+    prev = fm[(fm["season"] == season) & (fm["round"] == race_round - 1)]
+
+    if curr.empty or prev.empty or "constructor_id" not in curr.columns:
+        return pd.DataFrame()
+
+    # Use predicted position if available, else elo_overall as proxy
+    pos_col = "elo_overall"
+    if pos_col not in curr.columns:
+        return pd.DataFrame()
+
+    curr_avg = curr.groupby("constructor_id")[pos_col].mean()
+    prev_avg = prev.groupby("constructor_id")[pos_col].mean()
+
+    common = curr_avg.index.intersection(prev_avg.index)
+    if common.empty:
+        return pd.DataFrame()
+
+    delta = (curr_avg[common] - prev_avg[common]).reset_index()
+    delta.columns = ["constructor_id", "elo_delta"]
+    delta = delta.sort_values("elo_delta", ascending=False).reset_index(drop=True)
+
+    return delta
+
+
 def _build_prediction_accuracy(pred, race: pd.DataFrame):
     """Compare prediction vs actual race result."""
     if pred is None or pred.empty or race.empty:
@@ -374,6 +498,51 @@ def index():
         ctx = current[["driver_id", "constructor_id", "grid"]]
         pred = pred.merge(ctx, on="driver_id", how="left")
 
+    # Odds data (if cached)
+    odds = None
+    try:
+        from data.ingest.odds import OddsClient
+        odds_df = OddsClient().load_odds(season, race_round)
+        if odds_df is not None and not odds_df.empty and pred is not None:
+            # Merge odds into prediction table
+            odds_cols = ["driver_id"]
+            for c in ["best_odds", "best_book", "market_win_pct"]:
+                if c in odds_df.columns:
+                    odds_cols.append(c)
+            if len(odds_cols) > 1:
+                pred = pred.merge(odds_df[odds_cols], on="driver_id", how="left")
+                odds = True
+    except Exception:
+        pass
+
+    # Polymarket edge data (from cached snapshots — no live API calls on page load)
+    polymarket = None
+    try:
+        from data.ingest.polymarket import PolymarketClient as _PolyClient
+        _poly = _PolyClient()
+        poly_df = _poly.load_latest_snapshot(season, race_round)
+        if poly_df is not None and pred is not None:
+            poly_pred = pred.copy()
+            if "sim_win_pct" in poly_pred.columns and "model_win_pct" not in poly_pred.columns:
+                poly_pred["model_win_pct"] = poly_pred["sim_win_pct"] / 100.0
+            if "model_win_pct" in poly_pred.columns:
+                import numpy as np
+                merged_poly = poly_pred[["driver_id", "model_win_pct"]].merge(
+                    poly_df[["driver_id", "polymarket_prob"]], on="driver_id", how="inner",
+                )
+                if not merged_poly.empty:
+                    merged_poly["edge"] = ((merged_poly["model_win_pct"] - merged_poly["polymarket_prob"]) * 100).round(1)
+                    merged_poly["model_pct"] = (merged_poly["model_win_pct"] * 100).round(1)
+                    merged_poly["market_pct"] = (merged_poly["polymarket_prob"] * 100).round(1)
+                    decimal_odds = np.where(merged_poly["polymarket_prob"] > 0, 1.0 / merged_poly["polymarket_prob"], 0.0)
+                    b = decimal_odds - 1.0
+                    kelly_full = np.where(b > 0, (b * merged_poly["model_win_pct"] - (1.0 - merged_poly["model_win_pct"])) / b, 0.0)
+                    kelly_full = np.maximum(kelly_full, 0.0)
+                    merged_poly["kelly_stake"] = (kelly_full * 0.25 * 100).round(2)
+                    polymarket = merged_poly.sort_values("edge", ascending=False).reset_index(drop=True)
+    except Exception:
+        pass
+
     # Pre-sort DNF for chart (avoid sort_values in Jinja template)
     dnf_sorted = None
     if pred is not None and "sim_dnf_pct" in pred.columns:
@@ -408,9 +577,19 @@ def index():
     pred_accuracy = _build_prediction_accuracy(pred, race)
     position_history = _build_position_history(rr, current, season, race_round)
 
+    # Weather forecast
+    race_weather = _load_weather(season, race_round)
+
+    # Model performance (rolling Brier/MAE)
+    model_perf = _build_model_performance(rr, pred_set, season, race_round)
+
+    # Constructor performance delta vs previous round
+    constructor_delta = _build_constructor_delta(fm, season, race_round)
+
     return render_template(
         "terminal.html",
         pred=pred,
+        polymarket=polymarket,
         dnf_sorted=dnf_sorted,
         event_name=event,
         season=season,
@@ -429,6 +608,9 @@ def index():
         constructor_trends=constructor_trends,
         pred_accuracy=pred_accuracy,
         position_history=position_history,
+        race_weather=race_weather,
+        model_perf=model_perf,
+        constructor_delta=constructor_delta,
         **form_views,
         **elo_data,
     )
@@ -490,8 +672,8 @@ def api_predict():
     race_round = data.get("round")
     mode = data.get("mode", "predict")
 
-    if mode not in ("predict", "full"):
-        return jsonify({"error": "mode must be 'predict' or 'full'"}), 400
+    if mode not in ("predict", "full", "prerace"):
+        return jsonify({"error": "mode must be 'predict', 'full', or 'prerace'"}), 400
     if not season or not race_round:
         return jsonify({"error": "season and round required"}), 400
 
@@ -507,6 +689,41 @@ def api_predict():
             if mode == "full":
                 from data.auto_update import run_update
                 run_update(force=True)
+            elif mode == "prerace":
+                # Full pre-race workflow: weather + odds + predict
+                import logging
+                log = logging.getLogger("prerace")
+
+                # Step 1: Fetch weather
+                try:
+                    from data.ingest.weather import WeatherForecastClient
+                    client = WeatherForecastClient()
+                    client.fetch_historical_forecasts(season)
+                    log.info("Weather fetched for season %d", season)
+                except Exception as e:
+                    log.warning("Weather fetch failed (non-fatal): %s", e)
+
+                # Step 2: Fetch odds
+                try:
+                    from data.ingest.odds import OddsClient
+                    odds_client = OddsClient()
+                    odds_client.fetch_race_winner_odds(season, race_round)
+                    log.info("Odds fetched for %d R%d", season, race_round)
+                except Exception as e:
+                    log.warning("Odds fetch failed (non-fatal): %s", e)
+
+                # Step 3: Fetch Polymarket odds
+                try:
+                    from data.ingest.polymarket import PolymarketClient
+                    poly_client = PolymarketClient()
+                    poly_client.fetch_and_save(season, race_round)
+                    log.info("Polymarket odds fetched for %d R%d", season, race_round)
+                except Exception as e:
+                    log.warning("Polymarket fetch failed (non-fatal): %s", e)
+
+                # Step 4: Run prediction
+                from data.predict_weekend import run_weekend_prediction
+                run_weekend_prediction(season, race_round)
             else:
                 from data.predict_weekend import run_weekend_prediction
                 run_weekend_prediction(season, race_round)

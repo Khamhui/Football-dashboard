@@ -33,7 +33,7 @@ TEAM_COLORS_HEX = {
     "mercedes": "#00D2BE", "ferrari": "#DC0000", "red_bull": "#3671C6",
     "mclaren": "#FF8700", "alpine": "#0090FF", "aston_martin": "#006F62",
     "williams": "#005AFF", "haas": "#B6BABD", "rb": "#6692FF",
-    "audi": "#00E701", "cadillac": "#C0C0C0",
+    "audi": "#00E701", "sauber": "#00E701", "cadillac": "#C0C0C0",
 }
 
 TEAM_COLORS_RICH = {
@@ -41,14 +41,14 @@ TEAM_COLORS_RICH = {
     "mclaren": "bright_yellow", "alpine": "bright_cyan",
     "aston_martin": "green", "williams": "bright_blue",
     "haas": "white", "rb": "bright_blue",
-    "audi": "bright_green", "cadillac": "bright_white",
+    "audi": "bright_green", "sauber": "bright_green", "cadillac": "bright_white",
 }
 
 TEAM_SHORT = {
     "mercedes": "Mercedes", "ferrari": "Ferrari", "red_bull": "Red Bull",
     "mclaren": "McLaren", "alpine": "Alpine", "aston_martin": "Aston Martin",
     "williams": "Williams", "haas": "Haas", "rb": "RB",
-    "audi": "Audi", "cadillac": "Cadillac",
+    "audi": "Audi", "sauber": "Sauber", "cadillac": "Cadillac",
 }
 
 # Circuit type display names (distinct from data/features/elo.py CIRCUIT_TYPES which maps circuit_id → type)
