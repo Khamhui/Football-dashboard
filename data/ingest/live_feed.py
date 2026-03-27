@@ -25,6 +25,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 5.0
 
+FLAG_MAP = {
+    "green": "clear", "clear": "clear",
+    "yellow": "clear", "double yellow": "clear",
+    "safety car": "sc", "sc": "sc",
+    "virtual safety car": "vsc", "vsc": "vsc",
+    "red": "red", "red flag": "red",
+}
+
 # 2026 grid — update when drivers change numbers
 DRIVER_NUMBER_MAP: Dict[int, str] = {
     1: "max_verstappen", 4: "norris", 16: "leclerc", 44: "hamilton",
@@ -347,14 +355,12 @@ class LiveFeed:
             if not race_control_df.empty:
                 latest_rc = race_control_df.iloc[-1]
                 flag = str(latest_rc.get("flag", "")).lower()
-                if "safety" in flag:
-                    state.track_status = "sc"
-                elif "virtual" in flag:
-                    state.track_status = "vsc"
-                elif "red" in flag:
-                    state.track_status = "red"
-                else:
-                    state.track_status = "clear"
+                state.track_status = FLAG_MAP.get(flag, "clear")
+                if state.track_status == "clear":
+                    for key, val in FLAG_MAP.items():
+                        if key in flag:
+                            state.track_status = val
+                            break
 
                 if "message" in race_control_df.columns:
                     for _, rc in race_control_df.iterrows():

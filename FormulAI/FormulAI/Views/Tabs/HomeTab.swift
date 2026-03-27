@@ -7,6 +7,7 @@ struct HomeTab: View {
     @Environment(\.themeManager) private var theme
     @Environment(\.favorites) private var favorites
     @Environment(\.terminalLayout) private var layout
+    @Environment(\.dataStore) private var store
 
     var body: some View {
         ScrollView {
@@ -79,7 +80,7 @@ struct HomeTab: View {
     }
 
     private var weekendHeadline: some View {
-        let insight = MockData.predictionInsight
+        let insight = store.predictionInsight
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -148,15 +149,15 @@ struct HomeTab: View {
                 }
             }
 
-            PodiumForecast(predictions: Array(MockData.predictions.prefix(3)))
+            PodiumForecast(predictions: Array(store.predictions.prefix(3)))
         }
         .padding(.horizontal, layout.cardPadding)
     }
 
     private var whatChanged: some View {
-        TerminalSection(title: "What Changed", tag: "updated \(MockData.lastModelUpdate)") {
+        TerminalSection(title: "What Changed", tag: store.lastFetched.map { "updated \(Self.timeAgo($0))" } ?? "") {
             VStack(spacing: 6) {
-                ForEach(MockData.modelMovements) { move in
+                ForEach(store.modelMovements) { move in
                     MovementRow(
                         driverName: move.driverName,
                         teamId: move.teamId,
@@ -172,7 +173,7 @@ struct HomeTab: View {
     private var newsSection: some View {
         TerminalSection(title: "Latest News", tag: "RSS") {
             VStack(spacing: 0) {
-                ForEach(Array(MockData.newsHeadlines.enumerated()), id: \.element.id) { index, item in
+                ForEach(Array(store.newsHeadlines.enumerated()), id: \.element.id) { index, item in
                     HStack(alignment: .top, spacing: 8) {
                         Text(item.source.uppercased())
                             .font(.terminalMicro)
@@ -209,6 +210,13 @@ struct HomeTab: View {
                 }
             }
         }
+    }
+
+    private static func timeAgo(_ date: Date) -> String {
+        let seconds = Int(-date.timeIntervalSinceNow)
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(seconds / 60) min ago" }
+        return "\(seconds / 3600)h ago"
     }
 }
 

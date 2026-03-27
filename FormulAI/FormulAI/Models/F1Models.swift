@@ -10,6 +10,8 @@ struct RaceWeekend: Identifiable, Hashable {
     let circuitType: CircuitType
     let date: Date?
     let hasPrediction: Bool
+    var circuitId: String? = nil
+    var isCompleted: Bool = false
 
     var label: String { "\(season) R\(round) — \(name)" }
 }
@@ -77,6 +79,7 @@ struct DriverStanding: Identifiable {
     let position: Int
     let points: Double
     let wins: Int
+    var championshipProb: Double? = nil
 }
 
 struct ConstructorStanding: Identifiable {
@@ -84,7 +87,8 @@ struct ConstructorStanding: Identifiable {
     let teamName: String
     let position: Int
     let points: Double
-    let wins: Int
+    var wins: Int = 0
+    var championshipProb: Double? = nil
 }
 
 // MARK: - Circuit Context
@@ -120,9 +124,9 @@ struct CircuitInfo {
     let lengthKm: Double
     let raceDistanceKm: Double
     let lapRecord: String
-    let lapRecordHolder: String
+    var lapRecordHolder: String = ""
     let description: String
-    let recentWinners: [RecentWinner]
+    var recentWinners: [RecentWinner]
 }
 
 struct PredictionInsight {

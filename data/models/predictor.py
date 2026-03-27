@@ -25,7 +25,7 @@ from sklearn.ensemble import (
     StackingRegressor,
 )
 from sklearn.linear_model import Ridge
-from sklearn.model_selection import KFold, TimeSeriesSplit, cross_val_score
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import mean_absolute_error, accuracy_score
 
 logger = logging.getLogger(__name__)
@@ -149,8 +149,7 @@ class F1Predictor:
 
         n_splits = max(2, min(5, len(X) - 1))
         tscv = TimeSeriesSplit(n_splits=n_splits)
-        # StackingRegressor needs partition-based CV (KFold), not TimeSeriesSplit
-        stacking_cv = KFold(n_splits=n_splits, shuffle=False)
+        stacking_cv = TimeSeriesSplit(n_splits=n_splits)
 
         def _calibrate(base, y_binary):
             """Wrap classifier in VennAbersCalibrator (with CalibratedClassifierCV fallback)."""
@@ -162,7 +161,11 @@ class F1Predictor:
                 return base
             try:
                 from data.models.venn_abers import VennAbersCalibrator
-                logger.info("Using Venn-ABERS calibration (theoretically guaranteed)")
+                cal_size = int(len(y_binary) * 0.3)
+                if cal_size < 50:
+                    logger.warning(
+                        "Small calibration set (%d samples) — Venn-ABERS may be unreliable", cal_size
+                    )
                 return VennAbersCalibrator(base, cal_fraction=0.3)
             except Exception as e:
                 logger.warning("Venn-ABERS failed (%s), falling back to isotonic CV", e)

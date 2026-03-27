@@ -105,6 +105,10 @@ class F1LiveTimingClient:
                 params={"connectionData": json.dumps([{"name": F1_SIGNALR_HUB}])},
                 timeout=10,
             )
+            if resp.status_code in (401, 403):
+                logger.error("F1 Live Timing: authentication denied (%d). "
+                             "The endpoint may require credentials or be geo-blocked.", resp.status_code)
+                return False
             resp.raise_for_status()
             data = resp.json()
             self._connection_token = data.get("ConnectionToken")

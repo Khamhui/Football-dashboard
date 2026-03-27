@@ -24,7 +24,7 @@ enum AppTab: String, CaseIterable {
 
 struct ContentView: View {
     @State private var selectedTab: AppTab = .home
-    @State private var selectedWeekend: RaceWeekend = MockData.raceWeekends[0]
+    @State private var selectedWeekend: RaceWeekend?
     @State private var showSettings = false
     @State private var showOnboarding = !UserDefaults.standard.bool(forKey: AppUserDefaults.hasCompletedOnboarding)
     @State private var layout = TerminalLayout.default
@@ -32,6 +32,11 @@ struct ContentView: View {
 
     @Environment(\.colorScheme) private var scheme
     @Environment(\.themeManager) private var theme
+    @Environment(\.dataStore) private var store
+
+    private var currentWeekend: RaceWeekend {
+        selectedWeekend ?? store.races.first ?? MockData.raceWeekends[0]
+    }
 
     var body: some View {
         let colors = theme.colors(for: scheme)
@@ -41,19 +46,19 @@ struct ContentView: View {
 
             TabView(selection: $selectedTab) {
                 Tab(AppTab.home.label, systemImage: AppTab.home.icon, value: .home) {
-                    HomeTab(weekend: selectedWeekend)
+                    HomeTab(weekend: currentWeekend)
                 }
 
                 Tab(AppTab.raceHub.label, systemImage: AppTab.raceHub.icon, value: .raceHub) {
-                    RaceHubTab(weekend: selectedWeekend)
+                    RaceHubTab(weekend: currentWeekend)
                 }
 
                 Tab(AppTab.insights.label, systemImage: AppTab.insights.icon, value: .insights) {
-                    InsightsTab(weekend: selectedWeekend)
+                    InsightsTab(weekend: currentWeekend)
                 }
 
                 Tab(AppTab.standings.label, systemImage: AppTab.standings.icon, value: .standings) {
-                    StandingsTab(weekend: selectedWeekend)
+                    StandingsTab(weekend: currentWeekend)
                 }
             }
             .tint(theme.accent)
@@ -90,8 +95,11 @@ struct ContentView: View {
             Spacer()
 
             RaceSelector(
-                selected: $selectedWeekend,
-                weekends: MockData.raceWeekends
+                selected: Binding(
+                    get: { currentWeekend },
+                    set: { selectedWeekend = $0 }
+                ),
+                weekends: store.races.isEmpty ? MockData.raceWeekends : store.races
             )
 
             Button { showSettings = true } label: {

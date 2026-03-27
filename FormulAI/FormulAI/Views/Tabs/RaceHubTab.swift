@@ -66,10 +66,11 @@ private struct CircuitSegment: View {
     let weekend: RaceWeekend
 
     @Environment(\.terminalColors) private var colors
+    @Environment(\.dataStore) private var store
 
-    private let info = MockData.circuitInfo
-    private let profile = MockData.circuitProfile
-    private let weather = MockData.weather
+    private var info: CircuitInfo { store.circuitInfo ?? MockData.circuitInfo }
+    private var profile: CircuitProfile { store.circuitProfile ?? MockData.circuitProfile }
+    private var weather: WeatherForecast { store.weather ?? MockData.weather }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -128,7 +129,7 @@ private struct CircuitSegment: View {
     private var sessionSchedule: some View {
         TerminalSection(title: "Session Schedule", tag: "local time") {
             VStack(spacing: 4) {
-                ForEach(MockData.sessionSchedule) { entry in
+                ForEach(store.sessionSchedule) { entry in
                     SessionScheduleRow(session: entry.session, day: entry.day, time: entry.time)
                 }
             }
@@ -165,7 +166,7 @@ private struct CircuitSegment: View {
     private var trackSpecialistsSection: some View {
         TerminalSection(title: "Track Specialists") {
             VStack(spacing: 0) {
-                ForEach(Array(MockData.trackSpecialists.enumerated()), id: \.element.id) { index, spec in
+                ForEach(Array(store.trackSpecialists.enumerated()), id: \.element.id) { index, spec in
                     HStack(spacing: 0) {
                         HStack(spacing: 5) {
                             TeamColorBar(teamId: spec.teamId)
@@ -204,10 +205,11 @@ private struct PredictionsSegment: View {
     @Environment(\.themeManager) private var theme
     @Environment(\.favorites) private var favorites
     @Environment(\.terminalLayout) private var layout
+    @Environment(\.dataStore) private var store
 
     @State private var showFullGrid = false
 
-    private let predictions = MockData.predictions
+    private var predictions: [DriverPrediction] { store.predictions }
 
     private var visiblePredictions: [DriverPrediction] {
         if showFullGrid { return predictions }
@@ -223,7 +225,7 @@ private struct PredictionsSegment: View {
     var body: some View {
         VStack(spacing: 0) {
             if let winner = predictions.first {
-                HeroPredictionCard(driver: winner, insight: MockData.predictionInsight)
+                HeroPredictionCard(driver: winner, insight: store.predictionInsight)
                     .padding(.horizontal, layout.cardPadding)
                     .padding(.top, layout.sectionSpacing)
             }
@@ -281,7 +283,7 @@ private struct PredictionsSegment: View {
 
     private var dnfRiskChart: some View {
         TerminalSection(title: "DNF Risk", tag: "top 8") {
-            let dnfSorted = MockData.dnfSorted
+            let dnfSorted = store.predictions.sorted { $0.simDnfPct > $1.simDnfPct }.prefix(8).map { $0 }
             let maxVal = dnfSorted.first?.simDnfPct ?? 1
             VStack(spacing: 4) {
                 ForEach(dnfSorted) { driver in
@@ -305,8 +307,9 @@ private struct LivePlaceholder: View {
     @Environment(\.terminalColors) private var colors
     @Environment(\.themeManager) private var theme
     @Environment(\.terminalLayout) private var layout
+    @Environment(\.dataStore) private var store
 
-    private let weather = MockData.weather
+    private var weather: WeatherForecast { store.weather ?? MockData.weather }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -352,7 +355,7 @@ private struct LivePlaceholder: View {
     private var sessionScheduleCompact: some View {
         TerminalSection(title: "Session Schedule", tag: "local time") {
             VStack(spacing: 4) {
-                ForEach(Array(MockData.sessionSchedule.enumerated()), id: \.element.id) { index, entry in
+                ForEach(Array(store.sessionSchedule.enumerated()), id: \.element.id) { index, entry in
                     SessionScheduleRow(session: entry.session, day: entry.day, time: entry.time, isHighlighted: index == 0)
                 }
             }
@@ -362,7 +365,7 @@ private struct LivePlaceholder: View {
     private var whoToWatch: some View {
         TerminalSection(title: "Who to Watch", tag: "algorithm picks") {
             VStack(spacing: 8) {
-                ForEach(MockData.whoToWatch) { pick in
+                ForEach(store.whoToWatch) { pick in
                     watchCard(name: pick.name, teamId: pick.teamId, insight: pick.insight)
                 }
             }

@@ -42,12 +42,19 @@ COMPOUND_MAX_DEG = {"soft": 0.5, "medium": 0.35, "hard": 0.25, "intermediate": 0
 # street=0.65/race, high_speed=0.40, technical=0.35, mixed=0.45
 SC_PROB_PER_LAP = {"street": 0.018, "high_speed": 0.009, "technical": 0.008, "mixed": 0.011}
 
-# Overtaking difficulty (gap threshold in seconds for an overtake attempt)
-OVERTAKE_GAP_THRESHOLD = {"street": 0.6, "high_speed": 1.2, "technical": 0.9, "mixed": 1.0}
-OVERTAKE_SUCCESS_RATE = {"street": 0.15, "high_speed": 0.35, "technical": 0.25, "mixed": 0.30}
+# Overtaking: gap threshold (seconds) and success rate per attempt.
+# 2026 uses Overtake Mode (electric boost) instead of DRS — higher success on all tracks.
+# Calibrated from 2024-2025 overtake data + estimated 2026 boost impact.
+OVERTAKE_GAP_THRESHOLD = {"street": 0.5, "high_speed": 1.0, "technical": 0.8, "mixed": 0.9}
+OVERTAKE_SUCCESS_RATE = {"street": 0.12, "high_speed": 0.38, "technical": 0.22, "mixed": 0.28}
 
-# DNF probability per lap per driver
+# DNF probability per lap — base rate modulated by constructor reliability
 BASE_DNF_PER_LAP = 0.004
+CONSTRUCTOR_DNF_MULT = {
+    "mercedes": 0.6, "ferrari": 0.7, "red_bull": 0.8, "mclaren": 0.7,
+    "aston_martin": 0.9, "alpine": 1.0, "williams": 1.1, "rb": 1.0,
+    "haas": 1.2, "audi": 1.5, "cadillac": 1.8,
+}
 
 
 class RaceState:
@@ -130,15 +137,18 @@ class LiveRacePredictor:
         self,
         pre_race_predictions: pd.DataFrame,
         total_laps: int = 57,
+        circuit_type: str = "mixed",
     ):
         """
         Args:
             pre_race_predictions: DataFrame from F1Predictor.predict_race()
                 Must have: driver_id, predicted_position, prob_winner, prob_podium
             total_laps: Expected race distance in laps
+            circuit_type: street/high_speed/technical/mixed
         """
         self.pre_race = pre_race_predictions.set_index("driver_id")
         self.total_laps = total_laps
+        self.circuit_type = circuit_type
         self.current_state: Optional[RaceState] = None
         self.prediction_history: collections.deque = collections.deque(maxlen=200)
 
@@ -302,31 +312,27 @@ class LiveRacePredictor:
         # Pace delta as fraction of median (positive = slower)
         pace_delta = (driver.last_lap_time - median_time) / median_time
 
-        # Scale: 1% faster ≈ 0.5 position gain potential
-        return pace_delta * 50.0
+        # Scale: pace delta to position change, adjusted by circuit overtaking difficulty
+        pace_mult = {"street": 30.0, "high_speed": 60.0, "technical": 45.0, "mixed": 50.0}
+        mult = pace_mult.get(self.circuit_type, 50.0)
+        return pace_delta * mult
 
     def _tire_strategy_adjustment(self, driver: DriverState, race: RaceState) -> float:
         """
-        Adjust for tire strategy — old tires on a hard compound = likely to lose pace.
-        Fresh tires = likely to gain.
+        Adjust for tire strategy using the same physics constants as the Monte Carlo.
+        Returns estimated position loss from tire degradation.
         """
-        # Degradation curves (positions lost per lap on old tires)
-        deg_rates = {
-            "soft": 0.08,      # degrades fastest
-            "medium": 0.05,
-            "hard": 0.03,
-            "intermediate": 0.04,
-            "wet": 0.02,
-            "unknown": 0.05,
-        }
+        compound = driver.tire_compound
+        life = COMPOUND_LIFE.get(compound, 22)
+        deg_rate = COMPOUND_DEG_RATE.get(compound, 0.07)
+        max_deg = COMPOUND_MAX_DEG.get(compound, 0.35)
 
-        rate = deg_rates.get(driver.tire_compound, 0.05)
+        excess_laps = max(0, driver.tire_age - life)
+        pace_loss_sec = min(excess_laps * deg_rate, max_deg)
 
-        # Only penalize significantly after ~15 laps (soft), ~25 (medium), ~35 (hard)
-        sweet_spot = {"soft": 15, "medium": 25, "hard": 35}.get(driver.tire_compound, 20)
-        excess_laps = max(0, driver.tire_age - sweet_spot)
-
-        return excess_laps * rate
+        # Convert seconds/lap to approximate position loss:
+        # ~0.3s/lap gap between positions in a typical midfield battle
+        return pace_loss_sec / 0.3
 
     def _compute_live_win_prob(
         self,
@@ -646,6 +652,15 @@ class InRacePredictor:
         )
         pits_done = np.array([d[1].pits_completed for d in active_drivers], dtype=np.int32)
 
+        if not hasattr(self, "_driver_constructor"):
+            from data.ingest.live_feed import DRIVER_CONSTRUCTOR
+            self._driver_constructor = DRIVER_CONSTRUCTOR
+        dnf_rates = np.array([
+            BASE_DNF_PER_LAP * CONSTRUCTOR_DNF_MULT.get(
+                self._driver_constructor.get(d[0], "unknown"), 1.0
+            ) for d in active_drivers
+        ], dtype=np.float64)
+
         # Pace: use last lap time relative to leader as base pace delta
         leader_time = 0.0
         for did, ds in active_drivers:
@@ -683,6 +698,8 @@ class InRacePredictor:
         # Start with medium compound on pit: reasonable assumption
         medium_life = COMPOUND_LIFE["medium"]
         medium_deg = COMPOUND_DEG_RATE["medium"]
+        hard_life = COMPOUND_LIFE["hard"]
+        hard_deg = COMPOUND_DEG_RATE["hard"]
 
         # Simulate lap by lap
         for lap_offset in range(1, laps_remaining + 1):
@@ -716,9 +733,18 @@ class InRacePredictor:
             # Pit stop adds ~22s to gap
             sim_gaps[needs_pit] += 22.0
             sim_tire_age[needs_pit] = 0
-            sim_tire_life[needs_pit] = medium_life
-            sim_tire_deg[needs_pit] = medium_deg
-            sim_tire_max_deg[needs_pit] = COMPOUND_MAX_DEG.get("medium", 0.35)
+            # Stochastic compound: early pits favor medium, late pits favor hard
+            pit_count = int(needs_pit.sum())
+            if pit_count > 0:
+                progress = lap_offset / laps_remaining if laps_remaining > 0 else 1.0
+                hard_prob = min(0.7, 0.2 + progress * 0.5)
+                picks_hard = rng.random(pit_count) < hard_prob
+                life_vals = np.where(picks_hard, hard_life, medium_life)
+                deg_vals = np.where(picks_hard, hard_deg, medium_deg)
+                max_deg_vals = np.where(picks_hard, COMPOUND_MAX_DEG["hard"], COMPOUND_MAX_DEG["medium"])
+                sim_tire_life[needs_pit] = life_vals
+                sim_tire_deg[needs_pit] = deg_vals
+                sim_tire_max_deg[needs_pit] = max_deg_vals
             sim_pits[needs_pit] += 1
 
             # Safety car: random per sim
@@ -739,7 +765,7 @@ class InRacePredictor:
                 sim_gaps[sc_indices] = sc_gaps
 
             # DNF: random per driver per lap
-            dnf_this_lap = (rng.random((n_sims, n_drivers)) < BASE_DNF_PER_LAP) & (~sim_dnf)
+            dnf_this_lap = (rng.random((n_sims, n_drivers)) < dnf_rates) & (~sim_dnf)
             sim_dnf |= dnf_this_lap
             sim_gaps[sim_dnf] = 9999.0
 

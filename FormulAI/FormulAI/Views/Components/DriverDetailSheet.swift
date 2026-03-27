@@ -5,9 +5,10 @@ struct DriverDetailSheet: View {
 
     @Environment(\.terminalColors) private var colors
     @Environment(\.themeManager) private var theme
+    @Environment(\.dataStore) private var store
 
     var body: some View {
-        let eloHistory = MockData.eloRankings.first(where: { $0.id == driver.id })?.history ?? []
+        let eloHistory = store.eloRatings.first(where: { $0.id == driver.id })?.history ?? []
 
         VStack(spacing: 0) {
             HStack(spacing: 8) {

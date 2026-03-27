@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 CIRCUIT_TYPES = {
     # Street circuits — low grip, tight corners, walls
     "monaco": "street", "marina_bay": "street", "baku": "street",
-    "jeddah": "street", "albert_park": "street", "vegas": "street",
+    "jeddah": "street", "vegas": "street",
     "miami": "street",
     # High-speed — long straights, power-dependent
     "monza": "high_speed", "spa": "high_speed", "silverstone": "high_speed",
@@ -34,8 +34,9 @@ CIRCUIT_TYPES = {
     # Technical — lots of corners, downforce-dependent
     "hungaroring": "technical", "catalunya": "technical",
     "suzuka": "technical", "interlagos": "technical", "imola": "technical",
-    "zandvoort": "technical", "losail": "technical",
+    "zandvoort": "technical",
     # Mixed
+    "albert_park": "mixed", "losail": "mixed",
     "shanghai": "mixed", "americas": "mixed", "yas_marina": "mixed",
     "sepang": "mixed", "hockenheimring": "mixed", "nurburgring": "mixed",
     "istanbul": "mixed", "portimao": "mixed", "mugello": "mixed",
@@ -62,6 +63,17 @@ K_CONSTRUCTOR = 4     # Constructors change slower
 
 
 _DEFAULT_RATING = 1500.0
+
+# Rookies with strong junior series results start higher than the default.
+# Based on F2 championship finishing position: champion gets +150, runner-up +100, etc.
+ROOKIE_SEED_BONUS = {
+    "antonelli": 150,    # 2024 F2 champion
+    "bearman": 100,      # Strong F2 results + F1 sub experience
+    "hadjar": 80,        # F2 runner-up
+    "bortoleto": 60,     # F2 top 5
+    "arvid_lindblad": 50,  # F2 strong results
+    "colapinto": 40,     # F1 experience from 2024
+}
 
 
 @dataclass
@@ -115,7 +127,8 @@ class F1EloSystem:
 
     def _get_or_create(self, store: dict, key: str, initial: float = 1500.0) -> EloRating:
         if key not in store:
-            store[key] = EloRating(rating=initial)
+            bonus = ROOKIE_SEED_BONUS.get(key, 0)
+            store[key] = EloRating(rating=initial + bonus)
         return store[key]
 
     def _expected_score(self, rating_a: float, rating_b: float) -> float:
@@ -155,7 +168,6 @@ class F1EloSystem:
 
                 expected_a = self._expected_score(rating_a.rating, rating_b.rating)
 
-                # Actual score: 1 if A finished ahead, 0 if behind, 0.5 if tied
                 if pos_a < pos_b:
                     actual_a = 1.0
                 elif pos_a > pos_b:
@@ -163,8 +175,9 @@ class F1EloSystem:
                 else:
                     actual_a = 0.5
 
-                # Scale K by number of comparisons to keep total update reasonable
                 scaled_k = k / (n - 1)
+                if actual_a == 0.5:
+                    scaled_k *= 0.5  # ties are rare and uninformative
                 delta = scaled_k * (actual_a - expected_a)
 
                 deltas[id_a] += delta

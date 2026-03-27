@@ -7,14 +7,22 @@ struct InsightsTab: View {
     @Environment(\.themeManager) private var theme
     @Environment(\.favorites) private var favorites
     @Environment(\.terminalLayout) private var layout
+    @Environment(\.dataStore) private var store
+
+    private var topByWin: [DriverPrediction] {
+        Array(store.predictions.sorted { $0.simWinPct > $1.simWinPct }.prefix(8))
+    }
+    private var topByPodium: [DriverPrediction] {
+        Array(store.predictions.sorted { $0.simPodiumPct > $1.simPodiumPct }.prefix(8))
+    }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
                 eloRankings
                 teammateH2H
-                probabilityChart(title: "Win Probability", tag: "top 8", data: MockData.topByWin, keyPath: \.simWinPct)
-                probabilityChart(title: "Podium Probability", tag: "top 8", data: MockData.topByPodium, keyPath: \.simPodiumPct, color: colors.cyan)
+                probabilityChart(title: "Win Probability", tag: "top 8", data: topByWin, keyPath: \.simWinPct)
+                probabilityChart(title: "Podium Probability", tag: "top 8", data: topByPodium, keyPath: \.simPodiumPct, color: colors.cyan)
                 modelScorecard
                 comingSoon
             }
@@ -33,10 +41,10 @@ struct InsightsTab: View {
                     .foregroundStyle(colors.textDim)
                     .padding(.bottom, 10)
 
-                ForEach(Array(MockData.eloRankings.enumerated()), id: \.element.id) { index, driver in
+                ForEach(Array(store.eloRatings.enumerated()), id: \.element.id) { index, driver in
                     eloCard(driver, isFavorite: driver.id == favorites.favoriteDriverId)
                         .padding(.vertical, 6)
-                    if index < MockData.eloRankings.count - 1 {
+                    if index < store.eloRatings.count - 1 {
                         TerminalDivider()
                     }
                 }
@@ -125,7 +133,7 @@ struct InsightsTab: View {
     private var teammateH2H: some View {
         TerminalSection(title: "Teammate Battles", tag: "head-to-head after R\(weekend.round > 1 ? weekend.round - 1 : 1)") {
             VStack(spacing: 8) {
-                ForEach(MockData.teammateH2H) { h2h in
+                ForEach(store.teammateH2H) { h2h in
                     h2hRow(h2h)
                 }
             }
@@ -213,8 +221,8 @@ struct InsightsTab: View {
     // MARK: - Model Scorecard
 
     private var modelScorecard: some View {
-        TerminalSection(title: "Model Report Card", tag: "\(MockData.seasonAccuracy.totalRaces) races") {
-            let season = MockData.seasonAccuracy
+        TerminalSection(title: "Model Report Card", tag: "\(store.seasonAccuracy.totalRaces) races") {
+            let season = store.seasonAccuracy
 
             VStack(spacing: 12) {
                 HStack(spacing: 0) {
@@ -224,7 +232,7 @@ struct InsightsTab: View {
                 }
 
                 VStack(spacing: 6) {
-                    ForEach(MockData.raceAccuracy) { race in
+                    ForEach(store.raceAccuracy) { race in
                         HStack(spacing: 8) {
                             Image(systemName: race.winnerCorrect ? "checkmark.circle.fill" : "xmark.circle")
                                 .font(.system(size: 12))

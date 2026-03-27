@@ -16,13 +16,7 @@ final class FavoritesManager {
         didSet { UserDefaults.standard.set(favoriteTeamId, forKey: AppUserDefaults.favoriteTeamId) }
     }
 
-    private static let standingsById: [String: DriverStanding] = {
-        Dictionary(uniqueKeysWithValues: MockData.driverStandings.map { ($0.id, $0) })
-    }()
-
-    private static let predictionsById: [String: DriverPrediction] = {
-        Dictionary(uniqueKeysWithValues: MockData.predictions.map { ($0.id, $0) })
-    }()
+    var dataStore: DataStore?
 
     init() {
         self.favoriteDriverId = UserDefaults.standard.string(forKey: AppUserDefaults.favoriteDriverId) ?? "leclerc"
@@ -30,7 +24,7 @@ final class FavoritesManager {
     }
 
     var favoriteDriverName: String {
-        Self.standingsById[favoriteDriverId]?.driverName ?? favoriteDriverId.capitalized
+        dataStore?.driverStandings.first { $0.id == favoriteDriverId }?.driverName ?? favoriteDriverId.capitalized
     }
 
     var favoriteTeamName: String {
@@ -38,11 +32,11 @@ final class FavoritesManager {
     }
 
     var favoriteDriverStanding: DriverStanding? {
-        Self.standingsById[favoriteDriverId]
+        dataStore?.driverStandings.first { $0.id == favoriteDriverId }
     }
 
     var favoriteDriverPrediction: DriverPrediction? {
-        Self.predictionsById[favoriteDriverId]
+        dataStore?.predictions.first { $0.id == favoriteDriverId }
     }
 }
 

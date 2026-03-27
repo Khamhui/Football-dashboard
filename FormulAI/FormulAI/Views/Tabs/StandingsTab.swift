@@ -6,6 +6,7 @@ struct StandingsTab: View {
     @Environment(\.terminalColors) private var colors
     @Environment(\.themeManager) private var theme
     @Environment(\.favorites) private var favorites
+    @Environment(\.dataStore) private var store
 
     var body: some View {
         ScrollView {
@@ -22,7 +23,7 @@ struct StandingsTab: View {
     // MARK: - Championship Probability
 
     private var championshipProbability: some View {
-        let probs = MockData.championshipProbabilities
+        let probs = store.championshipProbabilities
         let maxProb = probs.first?.probability ?? 1
 
         return TerminalSection(title: "Championship Probability", tag: "based on 10,000 simulations of remaining 21 races") {
@@ -57,7 +58,7 @@ struct StandingsTab: View {
     // MARK: - Driver Standings
 
     private var driverStandings: some View {
-        let standings = MockData.driverStandings
+        let standings = store.driverStandings
         let maxPts = standings.first?.points ?? 1
 
         return TerminalSection(title: "Drivers Championship", tag: "2026") {
@@ -82,7 +83,7 @@ struct StandingsTab: View {
     // MARK: - Constructor Standings
 
     private var constructorStandings: some View {
-        let standings = MockData.constructorStandings
+        let standings = store.constructorStandings
         let maxPts = standings.first?.points ?? 1
 
         return TerminalSection(title: "Constructors", tag: "2026") {

@@ -5,6 +5,7 @@ struct OnboardingSheet: View {
     @Environment(\.terminalColors) private var colors
     @Environment(\.themeManager) private var theme
     @Environment(\.favorites) private var favorites
+    @Environment(\.dataStore) private var store
 
     @State private var step = 0
     @State private var selectedDriver: String = "leclerc"
@@ -180,7 +181,7 @@ struct OnboardingSheet: View {
 
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(MockData.driverStandings) { driver in
+                    ForEach(store.driverStandings) { driver in
                         selectionRow(
                             label: driver.driverName,
                             subtitle: F1Team.from(apiId: driver.teamId)?.displayName,

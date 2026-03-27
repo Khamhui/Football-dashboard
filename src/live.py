@@ -95,6 +95,12 @@ def _build_locations(state):
             "x": loc[0] if loc else None,
             "y": loc[1] if loc else None,
             "position": ds.position,
+            "gap_to_ahead": ds.gap_to_ahead,
+            "is_in_pit": ds.is_in_pit,
+            "is_retired": ds.is_retired,
+            "sector1": ds.sector1,
+            "sector2": ds.sector2,
+            "sector3": ds.sector3,
         })
         locations.append(entry)
     return locations

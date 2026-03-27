@@ -5,6 +5,7 @@ struct SettingsSheet: View {
     @Environment(\.terminalColors) private var colors
     @Environment(\.themeManager) private var theme
     @Environment(\.favorites) private var favorites
+    @Environment(\.dataStore) private var store
 
     var body: some View {
         NavigationStack {
@@ -98,7 +99,7 @@ struct SettingsSheet: View {
 
     @ViewBuilder
     private var driverPicker: some View {
-        ForEach(MockData.driverStandings) { driver in
+        ForEach(store.driverStandings) { driver in
             Button {
                 favorites.favoriteDriverId = driver.id
             } label: {
