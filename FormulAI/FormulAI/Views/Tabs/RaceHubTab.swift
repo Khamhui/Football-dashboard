@@ -230,15 +230,31 @@ private struct PredictionsSegment: View {
                     .padding(.top, layout.sectionSpacing)
             }
 
-            TerminalSection(title: "Race Grid", tag: showFullGrid ? "22 drivers" : "top 10") {
+            if layout.isWide {
+                HStack(alignment: .top, spacing: 0) {
+                    raceGrid
+                        .frame(maxWidth: .infinity)
+                    dnfRiskChart
+                        .frame(width: 340)
+                }
+            } else {
+                raceGrid
+                dnfRiskChart
+            }
+        }
+        .padding(.bottom, 16)
+    }
+
+    private var raceGrid: some View {
+        TerminalSection(title: "Race Grid", tag: showFullGrid ? "22 drivers" : "top 10") {
                 VStack(spacing: 0) {
                     HStack(spacing: 0) {
-                        TerminalHeaderCell(text: "#", width: 26, alignment: .center)
+                        TerminalHeaderCell(text: "#", width: 22, alignment: .center)
                         TerminalHeaderCell(text: "Driver")
-                        TerminalHeaderCell(text: "Win%", width: 50, alignment: .trailing)
-                        TerminalHeaderCell(text: "Pod%", width: 46, alignment: .trailing)
-                        TerminalHeaderCell(text: "DNF%", width: 44, alignment: .trailing)
-                        TerminalHeaderCell(text: "E[Pts]", width: 48, alignment: .trailing)
+                        TerminalHeaderCell(text: "Win", width: 44, alignment: .trailing)
+                        TerminalHeaderCell(text: "Podium", width: 50, alignment: .trailing)
+                        TerminalHeaderCell(text: "Ret%", width: 40, alignment: .trailing)
+                        TerminalHeaderCell(text: "Pts", width: 40, alignment: .trailing)
                     }
                     .padding(.bottom, 4)
 
@@ -262,11 +278,12 @@ private struct PredictionsSegment: View {
                         withAnimation(.easeInOut(duration: 0.3)) { showFullGrid.toggle() }
                     } label: {
                         HStack(spacing: 6) {
-                            Text(showFullGrid ? "Show Top 10" : "Show Full Grid")
-                                .font(.bodyMicro)
+                            Text(showFullGrid ? "Show Top 10" : "Show All 22 Drivers")
+                                .font(.bodyCaption)
+                                .fontWeight(.medium)
                                 .foregroundStyle(theme.accent)
                             Image(systemName: showFullGrid ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 9))
+                                .font(.system(size: 10, weight: .semibold))
                                 .foregroundStyle(theme.accent)
                         }
                         .frame(maxWidth: .infinity)
@@ -275,14 +292,10 @@ private struct PredictionsSegment: View {
                     .buttonStyle(.plain)
                 }
             }
-
-            dnfRiskChart
-        }
-        .padding(.bottom, 16)
     }
 
     private var dnfRiskChart: some View {
-        TerminalSection(title: "DNF Risk", tag: "top 8") {
+        TerminalSection(title: "Retirement Risk", tag: "top 8") {
             let dnfSorted = store.predictions.sorted { $0.simDnfPct > $1.simDnfPct }.prefix(8).map { $0 }
             let maxVal = dnfSorted.first?.simDnfPct ?? 1
             VStack(spacing: 4) {
@@ -453,22 +466,23 @@ struct DriverGridRow: View {
 
             Text(String(format: "%.1f", driver.simWinPct))
                 .font(.terminalCaption)
+                .fontWeight(driver.simWinPct >= 10 ? .bold : .regular)
                 .monospacedDigit()
                 .foregroundStyle(driver.simWinPct >= 10 ? colors.green : colors.textDim)
-                .frame(width: 50, alignment: .trailing)
+                .frame(width: 44, alignment: .trailing)
 
             Text(String(format: "%.1f", driver.simPodiumPct))
                 .font(.terminalCaption)
                 .monospacedDigit()
                 .foregroundStyle(colors.text)
-                .frame(width: 46, alignment: .trailing)
+                .frame(width: 50, alignment: .trailing)
 
             if showDnf {
-                Text(String(format: "%.1f", driver.simDnfPct))
+                Text(String(format: "%.0f", driver.simDnfPct))
                     .font(.terminalCaption)
                     .monospacedDigit()
                     .foregroundStyle(colors.dnfColor(for: driver.simDnfPct, accent: colors.text))
-                    .frame(width: 44, alignment: .trailing)
+                    .frame(width: 40, alignment: .trailing)
             }
 
             Text(String(format: "%.1f", driver.simExpectedPoints))
@@ -476,7 +490,7 @@ struct DriverGridRow: View {
                 .fontWeight(.semibold)
                 .monospacedDigit()
                 .foregroundStyle(colors.textBright)
-                .frame(width: 48, alignment: .trailing)
+                .frame(width: 40, alignment: .trailing)
         }
         .padding(.vertical, showTeamName ? 5 : 4)
         .background(isFavorite ? teamColor.opacity(0.08) : Color.clear)

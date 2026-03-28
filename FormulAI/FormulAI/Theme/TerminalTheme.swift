@@ -179,22 +179,28 @@ extension EnvironmentValues {
 
 struct TerminalLayout: Equatable, Sendable {
     let isCompact: Bool
+    let isWide: Bool
+    let screenWidth: CGFloat
     let cardRadius: CGFloat = 12
 
-    var cardPadding: CGFloat { isCompact ? 6 : 10 }
-    var cardInnerPadding: CGFloat { isCompact ? 10 : 14 }
-    var sectionSpacing: CGFloat { isCompact ? 6 : 8 }
-    var contentPadding: CGFloat { isCompact ? 10 : 12 }
+    var cardPadding: CGFloat { isWide ? 16 : (isCompact ? 6 : 10) }
+    var cardInnerPadding: CGFloat { isWide ? 18 : (isCompact ? 10 : 14) }
+    var sectionSpacing: CGFloat { isWide ? 10 : (isCompact ? 6 : 8) }
+    var contentPadding: CGFloat { isWide ? 16 : (isCompact ? 10 : 12) }
 
     init(screenWidth: CGFloat) {
+        self.screenWidth = screenWidth
         self.isCompact = screenWidth < 380
+        self.isWide = screenWidth >= 700
     }
 
-    private init(isCompact: Bool) {
+    private init(isCompact: Bool, isWide: Bool) {
         self.isCompact = isCompact
+        self.isWide = isWide
+        self.screenWidth = isWide ? 1024 : (isCompact ? 370 : 393)
     }
 
-    static let `default` = TerminalLayout(isCompact: false)
+    static let `default` = TerminalLayout(isCompact: false, isWide: false)
 }
 
 private struct TerminalLayoutKey: EnvironmentKey {

@@ -11,15 +11,35 @@ struct HomeTab: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 8) {
-                yourDriverCard
-                weekendHeadline
-                podiumTeaser
-                whatChanged
-                newsSection
+            if layout.isWide {
+                VStack(spacing: 8) {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(spacing: 8) {
+                            yourDriverCard
+                            weekendHeadline
+                            podiumTeaser
+                        }
+                        .frame(maxWidth: .infinity)
+
+                        VStack(spacing: 8) {
+                            whatChanged
+                            newsSection
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .padding(.horizontal, layout.cardPadding)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    yourDriverCard
+                    weekendHeadline
+                    podiumTeaser
+                    whatChanged
+                    newsSection
+                }
             }
-            .padding(.bottom, 16)
         }
+        .padding(.bottom, 16)
         .background(colors.bg)
     }
 

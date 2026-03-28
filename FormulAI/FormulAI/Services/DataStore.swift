@@ -85,10 +85,23 @@ final class DataStore {
 
     private func rebuildPredictionInsight() {
         guard let winner = predictions.first else { return }
+        let raceName = races.last?.name ?? "the upcoming race"
+        let runnerUp = predictions.count > 1 ? predictions[1] : nil
+
+        let whySentence: String
+        if winner.simWinPct > 40 {
+            whySentence = "\(winner.driverName) is the strong favorite for \(raceName). \(winner.teamName) has shown dominant pace all weekend."
+        } else if let ru = runnerUp, abs(winner.simWinPct - ru.simWinPct) < 5 {
+            whySentence = "Tight battle expected at \(raceName) — \(winner.driverName) and \(ru.driverName) are separated by just \(String(format: "%.1f", abs(winner.simWinPct - ru.simWinPct)))%."
+        } else {
+            whySentence = "\(winner.driverName) leads the predictions for \(raceName), but \(runnerUp?.driverName ?? "the field") could challenge from the front row."
+        }
+
+        let odds = max(2, Int(round(100.0 / max(winner.simWinPct, 1))))
         predictionInsight = PredictionInsight(
             winnerId: winner.id,
-            whySentence: "\(winner.teamName)'s technical circuit mastery and \(winner.driverName)'s qualifying edge give him a clear advantage at the upcoming race.",
-            casualDescription: "About 1 in \(max(2, Int(round(100.0 / max(winner.simWinPct, 1))))) chance of winning"
+            whySentence: whySentence,
+            casualDescription: "About 1 in \(odds) chance of winning"
         )
     }
 

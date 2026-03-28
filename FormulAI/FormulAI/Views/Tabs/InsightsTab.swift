@@ -18,23 +18,48 @@ struct InsightsTab: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 0) {
-                eloRankings
-                teammateH2H
-                probabilityChart(title: "Win Probability", tag: "top 8", data: topByWin, keyPath: \.simWinPct)
-                probabilityChart(title: "Podium Probability", tag: "top 8", data: topByPodium, keyPath: \.simPodiumPct, color: colors.cyan)
-                modelScorecard
-                comingSoon
+            if layout.isWide {
+                VStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 12) {
+                        eloRankings
+                            .frame(maxWidth: .infinity)
+                        VStack(spacing: 0) {
+                            teammateH2H
+                            modelScorecard
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .padding(.horizontal, layout.cardPadding)
+
+                    HStack(alignment: .top, spacing: 12) {
+                        probabilityChart(title: "Win Probability", tag: "top 8", data: topByWin, keyPath: \.simWinPct)
+                            .frame(maxWidth: .infinity)
+                        probabilityChart(title: "Podium Probability", tag: "top 8", data: topByPodium, keyPath: \.simPodiumPct, color: colors.cyan)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .padding(.horizontal, layout.cardPadding)
+
+                    comingSoon
+                }
+            } else {
+                VStack(spacing: 0) {
+                    eloRankings
+                    teammateH2H
+                    probabilityChart(title: "Win Probability", tag: "top 8", data: topByWin, keyPath: \.simWinPct)
+                    probabilityChart(title: "Podium Probability", tag: "top 8", data: topByPodium, keyPath: \.simPodiumPct, color: colors.cyan)
+                    modelScorecard
+                    comingSoon
+                }
             }
-            .padding(.bottom, 16)
         }
+        .padding(.bottom, 16)
         .background(colors.bg)
     }
 
     // MARK: - ELO Power Rankings
 
     private var eloRankings: some View {
-        TerminalSection(title: "Power Rankings", tag: "current form estimate") {
+        TerminalSection(title: "Driver Ratings", tag: "current form") {
             VStack(spacing: 0) {
                 Text("Higher rating = stronger recent form across qualifying, race pace, and consistency.")
                     .font(.bodyMicro)
@@ -80,18 +105,25 @@ struct InsightsTab: View {
                     .foregroundStyle(isHighlighted ? colors.textBright : colors.text)
                 Spacer()
 
-                TerminalPill(text: tier.label, color: tier.color)
-
                 Text("\(Int(driver.eloOverall))")
-                    .font(.system(size: 16, weight: .bold, design: .monospaced))
-                    .foregroundStyle(colors.textBright)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(colors.textDim)
                     .monospacedDigit()
+
+                Text(tier.label)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(0.5)
+                    .foregroundStyle(tier.color)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(tier.color.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
             }
 
             HStack(spacing: 0) {
-                eloMini("QUALI", Int(driver.eloQualifying))
-                eloMini("CIRCUIT", Int(driver.eloCircuitType))
-                eloMini("TEAM", Int(driver.eloConstructor))
+                eloMini("QUALIFYING", Int(driver.eloQualifying))
+                eloMini("TRACK", Int(driver.eloCircuitType))
+                eloMini("CAR", Int(driver.eloConstructor))
                 Spacer()
                 Sparkline(data: driver.history, width: 80, height: 24)
             }

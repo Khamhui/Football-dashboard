@@ -330,6 +330,9 @@ struct PodiumForecast: View {
                     .font(.terminalLabel)
                     .foregroundStyle(colors.textDim)
                     .monospacedDigit()
+                Text("podium")
+                    .font(.system(size: 7, weight: .medium, design: .default))
+                    .foregroundStyle(colors.textDim)
             }
 
             HStack(spacing: 4) {

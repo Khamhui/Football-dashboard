@@ -7,16 +7,30 @@ struct StandingsTab: View {
     @Environment(\.themeManager) private var theme
     @Environment(\.favorites) private var favorites
     @Environment(\.dataStore) private var store
+    @Environment(\.terminalLayout) private var layout
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 0) {
-                championshipProbability
-                driverStandings
-                constructorStandings
+            if layout.isWide {
+                VStack(spacing: 0) {
+                    championshipProbability
+                    HStack(alignment: .top, spacing: 12) {
+                        driverStandings
+                            .frame(maxWidth: .infinity)
+                        constructorStandings
+                            .frame(maxWidth: .infinity)
+                    }
+                    .padding(.horizontal, layout.cardPadding)
+                }
+            } else {
+                VStack(spacing: 0) {
+                    championshipProbability
+                    driverStandings
+                    constructorStandings
+                }
             }
-            .padding(.bottom, 16)
         }
+        .padding(.bottom, 16)
         .background(colors.bg)
     }
 
@@ -26,7 +40,7 @@ struct StandingsTab: View {
         let probs = store.championshipProbabilities
         let maxProb = probs.first?.probability ?? 1
 
-        return TerminalSection(title: "Championship Probability", tag: "based on 10,000 simulations of remaining 21 races") {
+        return TerminalSection(title: "Title Chances", tag: "season simulation") {
             VStack(spacing: 4) {
                 ForEach(probs) { driver in
                     HStack(spacing: 6) {

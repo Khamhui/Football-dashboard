@@ -35,7 +35,7 @@ struct ContentView: View {
     @Environment(\.dataStore) private var store
 
     private var currentWeekend: RaceWeekend {
-        selectedWeekend ?? store.races.first ?? MockData.raceWeekends[0]
+        selectedWeekend ?? store.races.last ?? MockData.raceWeekends[0]
     }
 
     var body: some View {
@@ -67,10 +67,11 @@ struct ContentView: View {
         .overlay { if showScanLine { BootScanLine(color: theme.accent) } }
         .environment(\.terminalColors, colors)
         .environment(\.terminalLayout, layout)
-        .onGeometryChange(for: Bool.self, of: { geo in
-            geo.size.width < 380
-        }, action: { isCompact in
-            layout = TerminalLayout(screenWidth: isCompact ? 370 : 393)
+        .onGeometryChange(for: CGFloat.self, of: { geo in
+            geo.size.width
+        }, action: { width in
+            let newLayout = TerminalLayout(screenWidth: width)
+            if newLayout != layout { layout = newLayout }
         })
         .preferredColorScheme(theme.appearanceMode.colorScheme)
         .task {

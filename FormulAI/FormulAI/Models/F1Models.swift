@@ -237,10 +237,10 @@ struct ModelMovement: Identifiable {
 // MARK: - Confidence Level
 
 enum ConfidenceLevel: String {
-    case high = "HIGH CONF"
+    case high = "HIGH"
     case moderate = "MODERATE"
     case volatile = "VOLATILE"
-    case coinFlip = "COIN FLIP"
+    case coinFlip = "50/50"
 }
 
 // MARK: - Championship Probability
