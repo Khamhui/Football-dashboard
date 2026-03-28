@@ -34,7 +34,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install numpy pandas scikit-learn xgboost catboost joblib \
-                    fastf1 psycopg2-binary python-dotenv pyarrow requests
+                    fastf1 psycopg2-binary python-dotenv pyarrow requests \
+                    tqdm rich scipy thefuzz
 
       - name: Detect current race
         id: race
