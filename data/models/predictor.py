@@ -149,7 +149,11 @@ class F1Predictor:
 
         n_splits = max(2, min(5, len(X) - 1))
         tscv = TimeSeriesSplit(n_splits=n_splits)
-        stacking_cv = TimeSeriesSplit(n_splits=n_splits)
+        # StackingRegressor requires partitioning CV (every sample in exactly one fold).
+        # TimeSeriesSplit doesn't partition — it expands the training set each fold.
+        # KFold(shuffle=False) preserves temporal order while partitioning.
+        from sklearn.model_selection import KFold
+        stacking_cv = KFold(n_splits=n_splits, shuffle=False)
 
         def _calibrate(base, y_binary):
             """Wrap classifier in VennAbersCalibrator (with CalibratedClassifierCV fallback)."""

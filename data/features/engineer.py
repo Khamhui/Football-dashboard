@@ -73,6 +73,9 @@ _FASTF1_ROLLING_COLS = [
     "tire_deg_soft", "tire_deg_medium", "tire_deg_hard",
     "avg_stint_deg_rate", "worst_stint_deg_rate",
     "n_stints", "n_compounds",
+    "lap1_position_change",
+    "race_pace_median",
+    "avg_positions_gained_per_stint", "best_stint_gain",
 ]
 
 _WINDOWS = [3, 5, 10, 20]
@@ -340,6 +343,37 @@ def _compute_fastf1_race_stats(
             if "Compound" in accurate.columns:
                 row["n_compounds"] = accurate["Compound"].nunique()
 
+            # --- NEW: Lap 1 position change ---
+            if "Position" in dlaps.columns and "LapNumber" in dlaps.columns:
+                lap1 = dlaps[dlaps["LapNumber"] == 1]
+                lap2 = dlaps[dlaps["LapNumber"] == 2]
+                if not lap1.empty and not lap2.empty:
+                    pos_start = lap1.iloc[0].get("Position")
+                    pos_after_lap1 = lap2.iloc[0].get("Position")
+                    if pd.notna(pos_start) and pd.notna(pos_after_lap1):
+                        row["lap1_position_change"] = int(pos_start) - int(pos_after_lap1)
+
+            # --- NEW: Race pace vs qualifying pace ---
+            if "LapTime_s" in accurate.columns and len(accurate) > 5:
+                race_pace = accurate["LapTime_s"].dropna()
+                # Use median to exclude outliers (pit laps, SC laps)
+                race_pace_median = race_pace.median()
+                row["race_pace_median"] = race_pace_median
+
+            # --- NEW: Stint-level strategy quality ---
+            if "Stint" in accurate.columns and "LapTime_s" in accurate.columns and "Position" in dlaps.columns:
+                stint_positions = []
+                for stint_num, stint_laps in dlaps.groupby("Stint"):
+                    if len(stint_laps) < 3:
+                        continue
+                    pos_start_stint = stint_laps.iloc[0].get("Position")
+                    pos_end_stint = stint_laps.iloc[-1].get("Position")
+                    if pd.notna(pos_start_stint) and pd.notna(pos_end_stint):
+                        stint_positions.append(int(pos_start_stint) - int(pos_end_stint))
+                if stint_positions:
+                    row["avg_positions_gained_per_stint"] = np.mean(stint_positions)
+                    row["best_stint_gain"] = max(stint_positions)
+
             if row:
                 stats[(int(year), int(gp), driver_id)] = row
 
@@ -586,10 +620,16 @@ def _compute_practice_pace(
                     long_run_times.extend(current_run)
 
                 if long_run_times:
-                    stats[key]["fp2_long_run_pace"] = np.mean(long_run_times)
-                    # Degradation rate: linear trend slope over long run laps
+                    raw_pace = np.mean(long_run_times)
+                    stats[key]["fp2_long_run_pace"] = raw_pace
                     if len(long_run_times) >= 6:
                         stats[key]["fp2_deg_rate"] = _linear_trend(np.array(long_run_times))
+                    # Fuel-corrected pace: assume long runs start with ~60% fuel
+                    # and burn ~0.06s/kg, with ~2.5kg/lap consumption
+                    # Mid-run correction: subtract estimated fuel effect
+                    n_laps = len(long_run_times)
+                    fuel_correction = 0.06 * 2.5 * (n_laps / 2)  # avg fuel delta over run
+                    stats[key]["fp2_long_run_pace_corrected"] = raw_pace - fuel_correction / n_laps
 
     # Flatten: take best across all FP sessions + pre-compute field medians
     result = {}
@@ -606,6 +646,8 @@ def _compute_practice_pace(
             entry["fp2_long_run_pace"] = s["fp2_long_run_pace"]
         if "fp2_deg_rate" in s:
             entry["fp2_deg_rate"] = s["fp2_deg_rate"]
+        if "fp2_long_run_pace_corrected" in s:
+            entry["fp2_long_run_pace_corrected"] = s["fp2_long_run_pace_corrected"]
         result[key] = entry
         race_key = (key[0], key[1])
         race_bests.setdefault(race_key, []).append(best)
@@ -1422,6 +1464,24 @@ def build_feature_matrix(
                     if len(cons_vals) >= 3:
                         features["f1_pace_consistency"] = np.mean(cons_vals)
 
+                    # --- NEW: Lap 1 performance (start ability) ---
+                    lap1_gains = [h["lap1_position_change"] for h in f1_hist[-5:] if "lap1_position_change" in h]
+                    if lap1_gains:
+                        features["f1_lap1_avg_gain"] = np.mean(lap1_gains)
+                        features["f1_lap1_best_gain"] = max(lap1_gains)
+
+                    # --- NEW: Race pace vs qualifying pace ---
+                    race_paces = [h["race_pace_median"] for h in f1_hist[-3:] if "race_pace_median" in h]
+                    quali_paces = [h["lap_best"] for h in f1_hist[-3:] if "lap_best" in h]
+                    if race_paces and quali_paces and len(race_paces) == len(quali_paces):
+                        deltas = [r - q for r, q in zip(race_paces, quali_paces)]
+                        features["f1_race_vs_quali_delta"] = np.mean(deltas)
+
+                    # --- NEW: Stint strategy quality ---
+                    stint_gains = [h["avg_positions_gained_per_stint"] for h in f1_hist[-5:] if "avg_positions_gained_per_stint" in h]
+                    if stint_gains:
+                        features["f1_stint_strategy_avg"] = np.mean(stint_gains)
+
                 # Track status rolling features (SC/VSC performance)
                 ts_hist = driver_track_status_history.get(driver_id, [])
                 if ts_hist:
@@ -1448,6 +1508,8 @@ def build_feature_matrix(
                         features["fp2_long_run_pace"] = fp_data["fp2_long_run_pace"]
                     if "fp2_deg_rate" in fp_data:
                         features["fp2_deg_rate"] = fp_data["fp2_deg_rate"]
+                    if "fp2_long_run_pace_corrected" in fp_data:
+                        features["fp2_long_run_pace_corrected"] = fp_data["fp2_long_run_pace_corrected"]
 
             # ── Constructor Development Trajectory ──
             # O(1) lookup from pre-accumulated constructor positions
@@ -1606,6 +1668,23 @@ def build_feature_matrix(
             ct_positions = ct_history.get(ct, [])
             if ct_positions:
                 features["constructor_pace_vs_prev_similar"] = np.mean(ct_positions)
+
+            # --- NEW: Constructor launch / start performance ---
+            # Aggregate lap1 gains from all drivers of same constructor in recent races
+            if has_fastf1:
+                constructor_lap1_gains = []
+                for other_did, other_hist in driver_fastf1_history.items():
+                    # Check if this driver belongs to the same constructor
+                    for h in other_hist[-3:]:
+                        race_key = h.get("_race_key")
+                        if race_key and "lap1_position_change" in h:
+                            rg = race_groups.get(race_key)
+                            if rg is not None:
+                                match = rg[(rg["driver_id"] == other_did) & (rg["constructor_id"] == constructor_id)]
+                                if not match.empty:
+                                    constructor_lap1_gains.append(h["lap1_position_change"])
+                if constructor_lap1_gains:
+                    features["constructor_lap1_avg_gain"] = np.mean(constructor_lap1_gains)
 
             # ── Cold Start / Rookie Handling ──
             career_count = driver_career_races.get(driver_id, 0)
